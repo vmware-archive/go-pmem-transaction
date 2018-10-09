@@ -1,0 +1,8 @@
+# Libraries
+*.a
+
+# Vim temporary files
+*.swp
+
+# Emacs temporary files
+*~
