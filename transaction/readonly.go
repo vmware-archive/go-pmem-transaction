@@ -1,5 +1,8 @@
-package transaction
+// TODO: See the usecase for a readonly TX support.
+// Disabling to allow other changes to build
 
+package transaction
+/*
 import (
 	"errors"
 	"log"
@@ -81,3 +84,4 @@ func (t *readonlyTx) unLock() {
 	}
 	t.rlocks = t.rlocks[0:0]
 }
+*/

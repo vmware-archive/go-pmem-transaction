@@ -3,6 +3,7 @@ package transaction
 import (
 	"errors"
 	"log"
+	"runtime"
 	"runtime/debug"
 	"unsafe"
 )
@@ -42,7 +43,7 @@ func (b *linearUndoBuffer) Write(input []byte) (n int, err error) {
 	}
 
 	copy(b.buffer[b.tail:], input)
-	Persist(unsafe.Pointer(&b.buffer[b.tail]), len(input))
+	runtime.PersistRange(unsafe.Pointer(&b.buffer[b.tail]), uintptr(len(input)))
 	b.tail += len(input)
 	return len(input), nil
 }
@@ -57,7 +58,7 @@ func (b *linearUndoBuffer) Read(output []byte) (n int, err error) {
 	}
 
 	copy(output, b.buffer[b.tail-len(output):b.tail])
-	Persist(unsafe.Pointer(&output[0]), len(output))
+	runtime.PersistRange(unsafe.Pointer(&output[0]), uintptr(len(output)))
 	b.tail -= len(output)
 	return len(output), nil
 }
