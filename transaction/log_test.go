@@ -31,7 +31,7 @@ func setup() TX {
 }
 
 func TestLog(t *testing.T) {
-	runtime.PmallocInit("_testLog", LOGSIZE, 64*1024*1024)
+	runtime.PmemInit("_testLog", 64*1024*1024, 0)
 	runtime.EnableGC()
 	Init(make([]byte, LOGSIZE))
 	testLog(t, NewUndo())
