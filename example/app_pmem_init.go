@@ -62,7 +62,7 @@ func initializeRoot(mapAddr unsafe.Pointer, size int) unsafe.Pointer {
 	appPmemRoot.appHeader[rootDataHead] = unsafe.Pointer(createListHead(firstDataValue))
 	appPmemRoot.appHeader[rootDataTail] = appPmemRoot.appHeader[rootDataHead]
 	fmt.Println("[app_pmem_init] InitializeRoot, created listHead & listTail")
-	runtime.PersistRange(unsafe.Pointer(appPmemRoot), uintptr(unsafe.Sizeof(*appPmemRoot)))
+	runtime.PersistRange(unsafe.Pointer(appPmemRoot), unsafe.Sizeof(*appPmemRoot))
 	return unsafe.Pointer(appPmemRoot)
 }
 
@@ -87,9 +87,12 @@ func updateAppHeaderListHead(tx transaction.TX, newHead *listNode) {
 	appPmemRoot.appHeader[rootDataHead] = unsafe.Pointer(newHead)
 	tx.End()
 
-	// This is needed because nested transactions' End() doesn't flush any
-	// updates.
-	runtime.PersistRange(unsafe.Pointer(&appPmemRoot.appHeader[rootDataHead]), uintptr(unsafe.Sizeof(appPmemRoot.appHeader[rootDataHead])))
+	// PersistRange() on updated head is used here for testing the transaction
+	// implementation. If the updated head has been persisted before a
+	// transaction is over and there is a crash, updates should be successfully
+	// rolled back. From application correctness point of view, the below
+	// call is NOT needed.
+	runtime.PersistRange(unsafe.Pointer(&appPmemRoot.appHeader[rootDataHead]), unsafe.Sizeof(appPmemRoot.appHeader[rootDataHead]))
 }
 
 func main() {
@@ -121,7 +124,7 @@ func main() {
 	runtime.EnableGC(gcPercent)
 
 	appPmemRoot.transactionLogHeadPtr = transaction.Init(appPmemRoot.transactionLogHeadPtr)
-	runtime.PersistRange(unsafe.Pointer(&appPmemRoot.transactionLogHeadPtr), uintptr(unsafe.Sizeof(appPmemRoot.transactionLogHeadPtr)))
+	runtime.PersistRange(unsafe.Pointer(&appPmemRoot.transactionLogHeadPtr), unsafe.Sizeof(appPmemRoot.transactionLogHeadPtr))
 	listHead = (*listNode)(appPmemRoot.appHeader[rootDataHead])
 	listTail = (*listNode)(appPmemRoot.appHeader[rootDataTail])
 
