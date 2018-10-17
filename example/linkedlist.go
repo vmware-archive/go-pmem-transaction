@@ -40,7 +40,7 @@ func createListHead(val int) *listNode {
 	fmt.Println("[dl_list] creating head ", val)
 	tmpNode := pnew(listNode)
 	tmpNode.val = 100
-	runtime.PersistRange(unsafe.Pointer(tmpNode), uintptr(unsafe.Sizeof(*tmpNode)))
+	runtime.PersistRange(unsafe.Pointer(tmpNode), unsafe.Sizeof(*tmpNode))
 	return tmpNode
 }
 
