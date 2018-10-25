@@ -43,7 +43,6 @@ import (
 )
 
 type (
-
 	/* entry for each undo log update, stay in persistent heap with pointer
 	to data copy */
 	entry struct {
@@ -104,7 +103,7 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 			txHeaderPtr.lLogPtr[i] = _initUndoTx(LENTRYSIZE)
 		}
 		runtime.PersistRange(unsafe.Pointer(txHeaderPtr),
-			uintptr(unsafe.Sizeof(*txHeaderPtr)))
+			unsafe.Sizeof(*txHeaderPtr))
 		logHeadPtr = unsafe.Pointer(txHeaderPtr)
 	} else {
 
@@ -143,8 +142,8 @@ func _initUndoTx(size int) *undoTx {
 	}
 	tx.log = pmake([]entry, size)
 	runtime.PersistRange(unsafe.Pointer(&tx.log),
-		uintptr(unsafe.Sizeof(tx.log)))
-	runtime.PersistRange(unsafe.Pointer(tx), uintptr(unsafe.Sizeof(*tx)))
+		uintptr(len(tx.log)*(int)(unsafe.Sizeof(tx.log[0]))))
+	runtime.PersistRange(unsafe.Pointer(tx), unsafe.Sizeof(*tx))
 	return tx
 }
 
@@ -174,11 +173,17 @@ func releaseUndoTx(t *undoTx) {
 }
 
 func (t *undoTx) updateLogTail(tail int) {
-
 	// atomic update
 	runtime.Fence()
+	if t.large && tail >= LENTRYSIZE {
+		log.Fatal("Too large transaction. Already logged ",
+			LENTRYSIZE, " entries")
+	} else if !t.large && tail >= SENTRYSIZE {
+		log.Fatal("Too large transaction. Already logged ",
+			SENTRYSIZE, " entries")
+	}
 	t.tail = tail
-	runtime.FlushRange(unsafe.Pointer(&t.tail), uintptr(unsafe.Sizeof(t.tail)))
+	runtime.FlushRange(unsafe.Pointer(&t.tail), unsafe.Sizeof(t.tail))
 	runtime.Fence()
 }
 
@@ -196,12 +201,10 @@ type sliceHeader struct {
 }
 
 func (t *undoTx) FakeLog(interface{}) {
-
 	// No logging
 }
 
 func (t *undoTx) Log(data interface{}) error {
-
 	// Check data type, allocate and assign copy of data.
 	var (
 		v1   reflect.Value = reflect.ValueOf(data)

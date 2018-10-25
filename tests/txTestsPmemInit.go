@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"go-pmem-transaction/transaction"
 	"log"
+	"os"
 	"runtime"
 	"unsafe"
 )
@@ -32,7 +33,10 @@ type pmemHeader struct {
 }
 
 // application root datastructure
-var appPmemRoot *pmemHeader
+var (
+	appPmemRoot *pmemHeader
+	setUpDone   bool
+)
 
 func initializeRoot(mapAddr unsafe.Pointer, size int) unsafe.Pointer {
 	appPmemRoot = pnew(pmemHeader)
@@ -56,6 +60,10 @@ func reInitializeRoot(appRootPtr unsafe.Pointer, size int) {
 }
 
 func setup() {
+	if setUpDone {
+		return
+	}
+	os.Remove("tx_testFile")
 	mapAddr := runtime.PmemInit("tx_testFile", dataSize, pmemOffset)
 	if mapAddr == nil {
 		log.Fatal("Persistent memory initialization failed")
@@ -81,4 +89,5 @@ func setup() {
 	runtime.EnableGC(gcPercent)
 	appPmemRoot.transactionLogHeadPtr =
 		transaction.Init(appPmemRoot.transactionLogHeadPtr)
+	setUpDone = true
 }

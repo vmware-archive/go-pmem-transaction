@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"go-pmem-transaction/transaction"
-	"os"
 	"reflect"
 	"runtime/debug"
 	"testing"
@@ -26,9 +25,6 @@ func addRet(tx transaction.TX, a *basic, b *basic) int {
 }
 
 func TestExec(t *testing.T) {
-	// Remove test file if it exists
-	os.Remove("tx_testFile")
-
 	// Set up pmem appRoot and header
 	setup()
 
