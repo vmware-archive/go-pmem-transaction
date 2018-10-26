@@ -310,5 +310,45 @@ func TestConcurrentLog(t *testing.T) {
 	}
 	wg.Wait()
 	assertEqual(t, struct1.i, struct2.i)
-	fmt.Println("After:", struct1.i, struct2.i)	
+	fmt.Println("After:", struct1.i, struct2.i)
+}
+
+func TestUndoLogNoIsolation(t *testing.T) {
+	setup()
+	resetData()
+	var wg sync.WaitGroup
+	chn0 := make(chan int)
+	chn1 := make(chan int)
+	fmt.Println("Testing no isolation for undo log")
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			if i == 1 {
+				<-chn1
+			}
+			defer wg.Done()
+			undoTx := transaction.NewUndoTx()
+			undoTx.Begin()
+			undoTx.Log(struct1)
+			tmp := struct1.i // shared variable read
+			if i == 1 {      // Goroutine 1
+				chn0 <- 1
+				<-chn1
+				struct1.i = tmp + 100
+				undoTx.End() // Oth goroutine doesn't execute this. So it's
+				// update is rolled back. But 1st goroutine already
+				// saw the update through tmp variable
+				transaction.Release(undoTx)
+			} else { // Goroutine 0
+				struct1.i = tmp + 100 // Rolled back subsequently, but update
+				// is visible immediately, before tx commit
+				chn1 <- 1
+				<-chn0
+				transaction.Release(undoTx)
+				chn1 <- 1
+			}
+		}(i)
+	}
+	wg.Wait()
+	assertEqual(t, struct1.i, 201)
 }

@@ -248,7 +248,7 @@ func (t *undoTx) Log(data interface{}) error {
 	// Flush logged data copy and entry.
 	runtime.PersistRange(t.log[tail].data, uintptr(size))
 	runtime.PersistRange(unsafe.Pointer(&t.log[tail]),
-		uintptr(unsafe.Sizeof(t.log[tail])))
+		unsafe.Sizeof(t.log[tail]))
 
 	// Update log offset in header.
 	t.updateLogTail(tail + 1)
