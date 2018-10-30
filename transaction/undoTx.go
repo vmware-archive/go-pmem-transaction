@@ -361,10 +361,10 @@ func (t *undoTx) abort() error {
 
 	// Replay undo logs
 	for i := t.tail - 1; i >= 0; i-- {
-		original := (*[LBUFFERSIZE]byte)(t.log[i].ptr)[:t.log[i].
-			size:t.log[i].size]
-		logdata := (*[LBUFFERSIZE]byte)(t.log[i].data)[:t.log[i].
-			size:t.log[i].size]
+		origDataPtr := (*[LBUFFERSIZE]byte)(t.log[i].ptr)
+		logDataPtr := (*[LBUFFERSIZE]byte)(t.log[i].data)
+		original := origDataPtr[:t.log[i].size:t.log[i].size]
+		logdata := logDataPtr[:t.log[i].size:t.log[i].size]
 
 		// TODO: Remove this. Fail here to test nested crashing
 		// time.Sleep(2 * time.Second)
