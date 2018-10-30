@@ -103,11 +103,12 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 		for i := 0; i < LLOGNUM; i++ {
 			txHeaderPtr.lLogPtr[i] = _initUndoTx(LENTRYSIZE)
 		}
-		runtime.PersistRange(unsafe.Pointer(txHeaderPtr), uintptr(unsafe.Sizeof(*txHeaderPtr)))
+		runtime.PersistRange(unsafe.Pointer(txHeaderPtr),
+			uintptr(unsafe.Sizeof(*txHeaderPtr)))
 		logHeadPtr = unsafe.Pointer(txHeaderPtr)
 	} else {
 
-		// fmt.Println("[undoTx] init: Don't initialize. Have prev run's header")
+		// fmt.Println("[undoTx] init: Dont initialize. Have prev run's header")
 		txHeaderPtr = (*undoTxHeader)(logHeadPtr)
 		if txHeaderPtr.magic != MAGIC {
 			log.Fatal("undoTxHeader magic does not match!")
@@ -141,7 +142,8 @@ func _initUndoTx(size int) *undoTx {
 		tx.large = true
 	}
 	tx.log = pmake([]entry, size)
-	runtime.PersistRange(unsafe.Pointer(&tx.log), uintptr(unsafe.Sizeof(tx.log)))
+	runtime.PersistRange(unsafe.Pointer(&tx.log),
+		uintptr(unsafe.Sizeof(tx.log)))
 	runtime.PersistRange(unsafe.Pointer(tx), uintptr(unsafe.Sizeof(*tx)))
 	return tx
 }
@@ -212,7 +214,6 @@ func (t *undoTx) Log(data interface{}) error {
 		typ = v1.Type()
 		v1len := v1.Len()
 		size = v1len * int(typ.Elem().Size())
-
 		v2 = reflect.PMakeSlice(typ, v1len, v1len)
 		vptr := (*Value)(unsafe.Pointer(&v2))
 		vshdr := (*sliceHeader)(vptr.ptr)
@@ -221,7 +222,6 @@ func (t *undoTx) Log(data interface{}) error {
 		sourcePtr := (*[LBUFFERSIZE]byte)(sshdr.data)[:size:size]
 		destPtr := (*[LBUFFERSIZE]byte)(vshdr.data)[:size:size]
 		copy(destPtr, sourcePtr)
-
 	case reflect.Ptr:
 		oldv := reflect.Indirect(v1) // get the underlying data of pointer
 		typ = oldv.Type()
@@ -244,11 +244,72 @@ func (t *undoTx) Log(data interface{}) error {
 
 	// Flush logged data copy and entry.
 	runtime.PersistRange(t.log[tail].data, uintptr(size))
-	runtime.PersistRange(unsafe.Pointer(&t.log[tail]), uintptr(unsafe.Sizeof(t.log[tail])))
+	runtime.PersistRange(unsafe.Pointer(&t.log[tail]),
+		uintptr(unsafe.Sizeof(t.log[tail])))
 
 	// Update log offset in header.
 	t.updateLogTail(tail + 1)
 	return nil
+}
+
+/* Exec function receives a variable number of interfaces as its arguments.
+ * Usage: Exec(fn_name, fn_arg1, fn_arg2, ...)
+ * Function fn_name() should not return anything.
+ * No need to Begin() & End() transaction separately if Exec() is used.
+ * Caveat: All locks within function fn_name(fn_arg1, fn_arg2, ...) should be
+ * taken before making Exec() call. Locks should be released after Exec() call.
+ */
+func (t *undoTx) Exec(intf ...interface{}) (err error, retVal []reflect.Value) {
+	if len(intf) < 1 {
+		return errors.New("[undoTx] Exec: Must have atleast one argument"),
+			retVal
+	}
+	fnPosInInterfaceArgs := 0
+	fn := reflect.ValueOf(intf[fnPosInInterfaceArgs]) // The function to call
+	if fn.Kind() != reflect.Func {
+		return errors.New("[undoTx] Exec: 1st argument must be a function"),
+			retVal
+	}
+	fnType := fn.Type()
+	fnName := runtime.FuncForPC(fn.Pointer()).Name()
+	// Populate the arguments of the function correctly
+	argv := make([]reflect.Value, fnType.NumIn())
+	if len(argv) != len(intf) {
+		return errors.New("[undoTx] Exec: Incorrect no. of args to function " +
+			fnName), retVal
+	}
+	for i := range argv {
+		if i == fnPosInInterfaceArgs {
+
+			// Add t *undoTx as the 1st argument to be passed to the function
+			// fn. This is not passed by the application when it calls Exec().
+			argv[i] = reflect.ValueOf(t)
+		} else {
+
+			// get the arguments to the function call from the call to Exec()
+			// and populate in argv
+			if reflect.TypeOf(intf[i]) != fnType.In(i) {
+				return errors.New("[undoTx] Exec: Incorrect type of args to " +
+					"function " + fnName), retVal
+			}
+			argv[i] = reflect.ValueOf(intf[i])
+		}
+	}
+	t.Begin()
+	defer func() {
+		if err == nil {
+			err = t.End()
+		} else {
+			t.End() // Prevent overwriting of error if it is non-nil
+		}
+	}()
+	txLevel := t.level
+	retVal = fn.Call(argv)
+	if txLevel != t.level {
+		return errors.New("[undoTx] Exec: Unbalanced Begin() & End() calls " +
+			"inside function " + fnName), retVal
+	}
+	return err, retVal
 }
 
 func (t *undoTx) Begin() error {
@@ -297,8 +358,10 @@ func (t *undoTx) abort() error {
 
 	// Replay undo logs
 	for i := t.tail - 1; i >= 0; i-- {
-		original := (*[LBUFFERSIZE]byte)(t.log[i].ptr)[:t.log[i].size:t.log[i].size]
-		logdata := (*[LBUFFERSIZE]byte)(t.log[i].data)[:t.log[i].size:t.log[i].size]
+		original := (*[LBUFFERSIZE]byte)(t.log[i].ptr)[:t.log[i].
+			size:t.log[i].size]
+		logdata := (*[LBUFFERSIZE]byte)(t.log[i].data)[:t.log[i].
+			size:t.log[i].size]
 
 		// TODO: Remove this. Fail here to test nested crashing
 		// time.Sleep(2 * time.Second)
