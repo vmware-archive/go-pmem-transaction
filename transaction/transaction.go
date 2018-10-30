@@ -2,6 +2,7 @@ package transaction
 
 import (
 	"log"
+	"reflect"
 	"unsafe"
 )
 
@@ -16,6 +17,7 @@ type (
 	TX interface {
 		Begin() error
 		Log(interface{}) error
+		Exec(...interface{}) (error, []reflect.Value)
 		FakeLog(interface{})
 		End() error
 		abort() error
