@@ -29,7 +29,8 @@ type pmemHeader struct {
 	mapAddr uintptr
 
 	// Transaction Log Header
-	transactionLogHeadPtr unsafe.Pointer
+	undoTxHeadPtr unsafe.Pointer
+	redoTxHeadPtr unsafe.Pointer
 }
 
 // application root datastructure
@@ -87,7 +88,9 @@ func setup() {
 		fmt.Println("Got appRoot from previous run")
 	}
 	runtime.EnableGC(gcPercent)
-	appPmemRoot.transactionLogHeadPtr =
-		transaction.Init(appPmemRoot.transactionLogHeadPtr)
+	appPmemRoot.undoTxHeadPtr =
+		transaction.Init(appPmemRoot.undoTxHeadPtr, "undo")
+	appPmemRoot.redoTxHeadPtr =
+		transaction.Init(appPmemRoot.redoTxHeadPtr, "redo")
 	setUpDone = true
 }

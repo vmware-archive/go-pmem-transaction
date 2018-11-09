@@ -16,7 +16,8 @@ const (
 type (
 	TX interface {
 		Begin() error
-		Log(interface{}) error
+		Log(...interface{}) error
+		ReadLog(interface{}) (interface{}, error)
 		Exec(...interface{}) (error, []reflect.Value)
 		FakeLog(interface{})
 		End() error
@@ -24,18 +25,24 @@ type (
 	}
 )
 
-func Init(logHeadPtr unsafe.Pointer) unsafe.Pointer {
-
-	// currently only support simple undo logging transaction.
-	return initUndoTx(logHeadPtr)
+func Init(logHeadPtr unsafe.Pointer, logType string) unsafe.Pointer {
+	switch logType {
+	case "undo":
+		return initUndoTx(logHeadPtr)
+	case "redo":
+		return initRedoTx(logHeadPtr)
+	default:
+		log.Panic("initializing unsupported transaction! Try undo/redo")
+	}
+	return nil
 }
 
 func Release(t TX) {
-
-	// currently only support simple undo logging transaction.
 	switch v := t.(type) {
 	case *undoTx:
 		releaseUndoTx(v)
+	case *redoTx:
+		releaseRedoTx(v)
 	default:
 		log.Panic("Releasing unsupported transaction!")
 	}

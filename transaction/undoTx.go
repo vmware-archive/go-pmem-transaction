@@ -174,7 +174,6 @@ func releaseUndoTx(t *undoTx) {
 
 func (t *undoTx) updateLogTail(tail int) {
 	// atomic update
-	runtime.Fence()
 	if t.large && tail >= LENTRYSIZE {
 		log.Fatal("Too large transaction. Already logged ",
 			LENTRYSIZE, " entries")
@@ -182,6 +181,7 @@ func (t *undoTx) updateLogTail(tail int) {
 		log.Fatal("Too large transaction. Already logged ",
 			SENTRYSIZE, " entries")
 	}
+	runtime.Fence() //TODO: Check if this can be removed
 	t.tail = tail
 	runtime.FlushRange(unsafe.Pointer(&t.tail), unsafe.Sizeof(t.tail))
 	runtime.Fence()
@@ -204,10 +204,19 @@ func (t *undoTx) FakeLog(interface{}) {
 	// No logging
 }
 
-func (t *undoTx) Log(data interface{}) error {
+func (t *undoTx) ReadLog(interface{}) (retVal interface{}, err error) {
+	return retVal, errors.New("[undoTx] ReadLog: undoTx doesn't support this")
+}
+
+func (t *undoTx) Log(data ...interface{}) error {
+	if len(data) != 1 {
+		return errors.New("[undoTx] Log: Incorrectly used. Correct usage: " +
+			"Log(ptr) OR Log(slice)")
+	}
+
 	// Check data type, allocate and assign copy of data.
 	var (
-		v1   reflect.Value = reflect.ValueOf(data)
+		v1   reflect.Value = reflect.ValueOf(data[0])
 		v2   reflect.Value
 		typ  reflect.Type
 		size int
