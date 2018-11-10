@@ -141,8 +141,6 @@ func _initUndoTx(size int) *undoTx {
 		tx.large = true
 	}
 	tx.log = pmake([]entry, size)
-	runtime.PersistRange(unsafe.Pointer(&tx.log),
-		uintptr(len(tx.log)*(int)(unsafe.Sizeof(tx.log[0]))))
 	runtime.PersistRange(unsafe.Pointer(tx), unsafe.Sizeof(*tx))
 	return tx
 }

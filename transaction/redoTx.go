@@ -51,10 +51,10 @@ type (
 		tail int
 
 		// Level of nesting. Needed for nested transactions
-		level    int
-		large    bool
-		commited bool
-		m        map[unsafe.Pointer]int
+		level     int
+		large     bool
+		committed bool
+		m         map[unsafe.Pointer]int
 	}
 
 	redoTxHeader struct {
@@ -94,7 +94,7 @@ func initRedoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 			log.Fatal("redoTxHeader magic does not match!")
 		}
 
-		// Depending on commited status of transactions, flush changes to
+		// Depending on committed status of transactions, flush changes to
 		// data structures or delete all log entries.
 		var tx *redoTx
 		for i := 0; i < SLOGNUM+LLOGNUM; i++ {
@@ -103,7 +103,7 @@ func initRedoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 			} else {
 				tx = headerPtr.lLogPtr[i-SLOGNUM]
 			}
-			if tx.commited {
+			if tx.committed {
 				tx.commit()
 			} else {
 				tx.abort()
@@ -127,8 +127,6 @@ func _initRedoTx(size int) *redoTx {
 		tx.large = true
 	}
 	tx.log = pmake([]entry, size)
-	runtime.PersistRange(unsafe.Pointer(&tx.log),
-		uintptr(len(tx.log)*(int)(unsafe.Sizeof(tx.log[0]))))
 	runtime.PersistRange(unsafe.Pointer(tx), unsafe.Sizeof(*tx))
 	tx.m = make(map[unsafe.Pointer]int) // On abort m isn't used, so not in pmem
 	return tx
@@ -380,14 +378,14 @@ func (t *redoTx) End() error {
 	}
 	t.level--
 	if t.level == 0 {
-		// Flush changes in log. Mark tx as commited. Call commit()
+		// Flush changes in log. Mark tx as committed. Call commit()
 		// to transfer changes to app data structures
 		for i := t.tail - 1; i >= 0; i-- {
 			runtime.PersistRange(t.log[i].data, uintptr(t.log[i].size))
 		}
 		runtime.PersistRange(unsafe.Pointer(&t.log[0]),
 			uintptr(t.tail*(int)(unsafe.Sizeof(t.log[0]))))
-		t.commited = true
+		t.committed = true
 		runtime.PersistRange(unsafe.Pointer(t), unsafe.Sizeof(*t))
 		t.commit()
 	}
@@ -405,8 +403,9 @@ func (t *redoTx) commit() error {
 		copy(oldData, logData)
 		runtime.PersistRange(t.log[i].ptr, uintptr(t.log[i].size))
 	}
-	t.commited = false
-	runtime.PersistRange(unsafe.Pointer(&t.commited), unsafe.Sizeof(t.commited))
+	t.committed = false
+	runtime.PersistRange(unsafe.Pointer(&t.committed),
+		unsafe.Sizeof(t.committed))
 	t.abort()
 
 	// TODO: Check if this is okay to remove
@@ -421,9 +420,16 @@ func (t *redoTx) abort() error {
 		return nil
 	}
 	t.level = 0
+	t.m = make(map[unsafe.Pointer]int)
+	var sz int
+	if t.large {
+		sz = LENTRYSIZE
+	} else {
+		sz = SENTRYSIZE
+	}
+
 	// Replay redo logs
-	for i := t.tail - 1; i >= 0; i-- {
-		delete(t.m, t.log[i].ptr)
+	for i := sz - 1; i >= 0; i-- {
 		t.log[i].ptr = nil
 		t.log[i].data = nil
 		t.log[i].size = 0
