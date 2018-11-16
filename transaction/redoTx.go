@@ -406,34 +406,28 @@ func (t *redoTx) commit() error {
 	t.committed = false
 	runtime.PersistRange(unsafe.Pointer(&t.committed),
 		unsafe.Sizeof(t.committed))
-	t.abort()
-
-	// TODO: Check if this is okay to remove
-	// runtime.PersistRange(unsafe.Pointer(t), unsafe.Sizeof(*t))
+	t.reset(t.tail)
 	return nil
 }
 
-// Clears the entries of the log
+// Resets every entry in the log
 func (t *redoTx) abort() error {
-	if t.tail == 0 {
-		// Nothing stored in this log
-		return nil
+	if t.large {
+		t.reset(LENTRYSIZE)
+	} else {
+		t.reset(SENTRYSIZE)
 	}
+	return nil
+}
+
+// Resets the entries from sz-1 to 0 in the log
+func (t *redoTx) reset(sz int) {
 	t.level = 0
 	t.m = make(map[unsafe.Pointer]int)
-	var sz int
-	if t.large {
-		sz = LENTRYSIZE
-	} else {
-		sz = SENTRYSIZE
-	}
-
-	// Replay redo logs
 	for i := sz - 1; i >= 0; i-- {
 		t.log[i].ptr = nil
 		t.log[i].data = nil
 		t.log[i].size = 0
 	}
 	t.tail = 0
-	return nil
 }
