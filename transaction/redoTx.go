@@ -157,10 +157,6 @@ func releaseRedoTx(t *redoTx) {
 	}
 }
 
-func (t *redoTx) FakeLog(interface{}) {
-	// No logging
-}
-
 func (t *redoTx) ReadLog(ptr interface{}) (retVal interface{}, err error) {
 	ptrV := reflect.ValueOf(ptr)
 	oldVal := reflect.Indirect(ptrV)
@@ -313,24 +309,24 @@ func (t *redoTx) writeLogEntry(ptr uintptr, data reflect.Value) error {
  * Caveat: All locks within function fn_name(fn_arg1, fn_arg2, ...) should be
  * taken before making Exec() call. Locks should be released after Exec() call.
  */
-func (t *redoTx) Exec(intf ...interface{}) (err error, retVal []reflect.Value) {
+func (t *redoTx) Exec(intf ...interface{}) (retVal []reflect.Value, err error) {
 	if len(intf) < 1 {
-		return errors.New("[redoTx] Exec: Must have atleast one argument"),
-			retVal
+		return retVal,
+			errors.New("[redoTx] Exec: Must have atleast one argument")
 	}
 	fnPosInInterfaceArgs := 0
 	fn := reflect.ValueOf(intf[fnPosInInterfaceArgs]) // The function to call
 	if fn.Kind() != reflect.Func {
-		return errors.New("[redoTx] Exec: 1st argument must be a function"),
-			retVal
+		return retVal,
+			errors.New("[redoTx] Exec: 1st argument must be a function")
 	}
 	fnType := fn.Type()
 	fnName := runtime.FuncForPC(fn.Pointer()).Name()
 	// Populate the arguments of the function correctly
 	argv := make([]reflect.Value, fnType.NumIn())
 	if len(argv) != len(intf) {
-		return errors.New("[redoTx] Exec: Incorrect no. of args to function " +
-			fnName), retVal
+		return retVal, errors.New("[redoTx] Exec: Incorrect no. of args to " +
+			"function " + fnName)
 	}
 	for i := range argv {
 		if i == fnPosInInterfaceArgs {
@@ -341,8 +337,8 @@ func (t *redoTx) Exec(intf ...interface{}) (err error, retVal []reflect.Value) {
 			// get the arguments to the function call from the call to Exec()
 			// and populate in argv
 			if reflect.TypeOf(intf[i]) != fnType.In(i) {
-				return errors.New("[redoTx] Exec: Incorrect type of args to " +
-					"function " + fnName), retVal
+				return retVal, errors.New("[redoTx] Exec: Incorrect type of " +
+					"args to function " + fnName)
 			}
 			argv[i] = reflect.ValueOf(intf[i])
 		}
@@ -358,10 +354,10 @@ func (t *redoTx) Exec(intf ...interface{}) (err error, retVal []reflect.Value) {
 	txLevel := t.level
 	retVal = fn.Call(argv)
 	if txLevel != t.level {
-		return errors.New("[redoTx] Exec: Unbalanced Begin() & End() calls " +
-			"inside function " + fnName), retVal
+		return retVal, errors.New("[redoTx] Exec: Unbalanced Begin() & End() " +
+			"calls inside function " + fnName)
 	}
-	return err, retVal
+	return retVal, err
 }
 
 func (t *redoTx) Begin() error {

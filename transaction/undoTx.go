@@ -34,7 +34,7 @@
 package transaction
 
 import (
-	"errors" // "fmt" // TODO: Remove fmt import. Used for debug prints
+	"errors"
 	"log"
 	"reflect"
 	"runtime"
@@ -46,7 +46,6 @@ type (
 	/* entry for each undo log update, stay in persistent heap with pointer
 	to data copy */
 	entry struct {
-		id   int // TODO: global counter to determine entry order for recovery
 		ptr  unsafe.Pointer
 		data unsafe.Pointer
 		size int
@@ -91,9 +90,7 @@ var (
  */
 func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 	if logHeadPtr == nil {
-
 		// First time initialization
-		// fmt.Println("[undoTx] init: first time initialization")
 		txHeaderPtr = pnew(undoTxHeader)
 		txHeaderPtr.magic = MAGIC
 		for i := 0; i < SLOGNUM; i++ {
@@ -106,8 +103,6 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 			unsafe.Sizeof(*txHeaderPtr))
 		logHeadPtr = unsafe.Pointer(txHeaderPtr)
 	} else {
-
-		// fmt.Println("[undoTx] init: Dont initialize. Have prev run's header")
 		txHeaderPtr = (*undoTxHeader)(logHeadPtr)
 		if txHeaderPtr.magic != MAGIC {
 			log.Fatal("undoTxHeader magic does not match!")
@@ -198,10 +193,6 @@ type sliceHeader struct {
 	cap  int
 }
 
-func (t *undoTx) FakeLog(interface{}) {
-	// No logging
-}
-
 func (t *undoTx) ReadLog(interface{}) (retVal interface{}, err error) {
 	return retVal, errors.New("[undoTx] ReadLog: undoTx doesn't support this")
 }
@@ -249,9 +240,6 @@ func (t *undoTx) Log(data ...interface{}) error {
 	t.log[tail].data = unsafe.Pointer(v2.Pointer()) // point to logged copy
 	t.log[tail].size = size                         // size of data
 
-	// fmt.Println("[undoTx] Log: tail =", tail, "ptr =", t.log[tail].ptr)
-	// fmt.Println("data =", reflect.Indirect(v2), "size =", t.log[tail].size)
-
 	// Flush logged data copy and entry.
 	runtime.PersistRange(t.log[tail].data, uintptr(size))
 	runtime.PersistRange(unsafe.Pointer(&t.log[tail]),
@@ -269,38 +257,36 @@ func (t *undoTx) Log(data ...interface{}) error {
  * Caveat: All locks within function fn_name(fn_arg1, fn_arg2, ...) should be
  * taken before making Exec() call. Locks should be released after Exec() call.
  */
-func (t *undoTx) Exec(intf ...interface{}) (err error, retVal []reflect.Value) {
+func (t *undoTx) Exec(intf ...interface{}) (retVal []reflect.Value, err error) {
 	if len(intf) < 1 {
-		return errors.New("[undoTx] Exec: Must have atleast one argument"),
-			retVal
+		return retVal,
+			errors.New("[undoTx] Exec: Must have atleast one argument")
 	}
 	fnPosInInterfaceArgs := 0
 	fn := reflect.ValueOf(intf[fnPosInInterfaceArgs]) // The function to call
 	if fn.Kind() != reflect.Func {
-		return errors.New("[undoTx] Exec: 1st argument must be a function"),
-			retVal
+		return retVal,
+			errors.New("[undoTx] Exec: 1st argument must be a function")
 	}
 	fnType := fn.Type()
 	fnName := runtime.FuncForPC(fn.Pointer()).Name()
 	// Populate the arguments of the function correctly
 	argv := make([]reflect.Value, fnType.NumIn())
 	if len(argv) != len(intf) {
-		return errors.New("[undoTx] Exec: Incorrect no. of args to function " +
-			fnName), retVal
+		return retVal, errors.New("[undoTx] Exec: Incorrect no. of args to " +
+			"function " + fnName)
 	}
 	for i := range argv {
 		if i == fnPosInInterfaceArgs {
-
 			// Add t *undoTx as the 1st argument to be passed to the function
 			// fn. This is not passed by the application when it calls Exec().
 			argv[i] = reflect.ValueOf(t)
 		} else {
-
 			// get the arguments to the function call from the call to Exec()
 			// and populate in argv
 			if reflect.TypeOf(intf[i]) != fnType.In(i) {
-				return errors.New("[undoTx] Exec: Incorrect type of args to " +
-					"function " + fnName), retVal
+				return retVal, errors.New("[undoTx] Exec: Incorrect type of " +
+					"args to function " + fnName)
 			}
 			argv[i] = reflect.ValueOf(intf[i])
 		}
@@ -316,23 +302,21 @@ func (t *undoTx) Exec(intf ...interface{}) (err error, retVal []reflect.Value) {
 	txLevel := t.level
 	retVal = fn.Call(argv)
 	if txLevel != t.level {
-		return errors.New("[undoTx] Exec: Unbalanced Begin() & End() calls " +
-			"inside function " + fnName), retVal
+		return retVal, errors.New("[undoTx] Exec: Unbalanced Begin() & End() " +
+			"calls inside function " + fnName)
 	}
-	return err, retVal
+	return retVal, err
 }
 
 func (t *undoTx) Begin() error {
-
-	// fmt.Println("[undoTx] Begin")
-	t.level += 1
+	t.level++
 	return nil
 }
 
 /* Also persists the new data written by application, so application
  * doesn't need to do it separately. For nested transactions, End() call to
  * inner transaction does nothing. Only when the outermost transaction ends,
- * all application data is flushed to pmem. TODO: See if this behavior is okay.
+ * all application data is flushed to pmem.
  */
 func (t *undoTx) End() error {
 	if t.level == 0 {
@@ -340,33 +324,24 @@ func (t *undoTx) End() error {
 	}
 	t.level--
 	if t.level == 0 {
-
 		// Need to flush current value of logged areas
-		// fmt.Println("[undoTx] End: Persist updates made to app structures")
 		for i := t.tail - 1; i >= 0; i-- {
 			runtime.PersistRange(t.log[i].ptr, uintptr(t.log[i].size))
 		}
 		t.updateLogTail(0) // discard all logs.
-	} else {
-
-		// fmt.Println("[undoTx] End: Nested transaction. Not doing anything")
 	}
 	return nil
 }
 
 func (t *undoTx) abort() error {
 	if t.tail == 0 {
-
 		// Nothing stored in this log
 		return nil
 	}
 
-	// fmt.Println("[undoTx] abort: uncommitted transaction")
-	// Has uncommitted log
-	// TODO: order abort sequence according to some global counter
+	// Has uncommitted log. Replay undo logs
+	// Order last updates first, during abort
 	t.level = 0
-
-	// Replay undo logs
 	for i := t.tail - 1; i >= 0; i-- {
 		origDataPtr := (*[LBUFFERSIZE]byte)(t.log[i].ptr)
 		logDataPtr := (*[LBUFFERSIZE]byte)(t.log[i].data)

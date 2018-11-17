@@ -18,8 +18,7 @@ type (
 		Begin() error
 		Log(...interface{}) error
 		ReadLog(interface{}) (interface{}, error)
-		Exec(...interface{}) (error, []reflect.Value)
-		FakeLog(interface{})
+		Exec(...interface{}) ([]reflect.Value, error)
 		End() error
 		abort() error
 	}

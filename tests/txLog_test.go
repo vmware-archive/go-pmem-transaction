@@ -27,7 +27,6 @@ var (
 )
 
 func BenchmarkUndoLogInt(b *testing.B) {
-	setup()
 	j = pnew(int)
 	tx := transaction.NewUndoTx()
 	b.ResetTimer()
@@ -41,7 +40,6 @@ func BenchmarkUndoLogInt(b *testing.B) {
 }
 
 func BenchmarkUndoLogSlice(b *testing.B) {
-	setup()
 	struct1 = pnew(structLogTest)
 	struct1.slice = pmake([]int, 10000)
 	tx := transaction.NewLargeUndoTx()
@@ -56,7 +54,6 @@ func BenchmarkUndoLogSlice(b *testing.B) {
 }
 
 func BenchmarkUndoLogStruct(b *testing.B) {
-	setup()
 	struct1 = pnew(structLogTest)
 	struct1.slice = pmake([]int, 10000)
 	tx := transaction.NewLargeUndoTx()
@@ -73,7 +70,6 @@ func BenchmarkUndoLogStruct(b *testing.B) {
 }
 
 func BenchmarkUndoLog100Ints(b *testing.B) {
-	setup()
 	slice1 = pmake([]int, 100)
 	tx := transaction.NewUndoTx()
 	b.ResetTimer()
@@ -89,7 +85,6 @@ func BenchmarkUndoLog100Ints(b *testing.B) {
 }
 
 func BenchmarkRawInt(b *testing.B) {
-	setup()
 	j = pnew(int)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -99,7 +94,6 @@ func BenchmarkRawInt(b *testing.B) {
 }
 
 func BenchmarkRawSlice(b *testing.B) {
-	setup()
 	struct1 = pnew(structLogTest)
 	struct1.slice = pmake([]int, 10000)
 	b.ResetTimer()
@@ -112,7 +106,6 @@ func BenchmarkRawSlice(b *testing.B) {
 }
 
 func BenchmarkRawStruct(b *testing.B) {
-	setup()
 	struct1 = pnew(structLogTest)
 	struct1.slice = pmake([]int, 10000)
 	b.ResetTimer()
@@ -126,7 +119,6 @@ func BenchmarkRawStruct(b *testing.B) {
 }
 
 func BenchmarkRedoLogInt(b *testing.B) {
-	setup()
 	j = pnew(int)
 	tx := transaction.NewRedoTx()
 	b.ResetTimer()
@@ -139,7 +131,6 @@ func BenchmarkRedoLogInt(b *testing.B) {
 }
 
 func BenchmarkRedoLog100Ints(b *testing.B) {
-	setup()
 	slice1 = pmake([]int, 100)
 	tx := transaction.NewUndoTx()
 	b.ResetTimer()
@@ -154,7 +145,6 @@ func BenchmarkRedoLog100Ints(b *testing.B) {
 }
 
 func BenchmarkRedoLogSlice(b *testing.B) {
-	setup()
 	struct1 = pnew(structLogTest)
 	struct2 = pnew(structLogTest)
 	struct1.slice = pmake([]int, 10000)
@@ -171,7 +161,6 @@ func BenchmarkRedoLogSlice(b *testing.B) {
 }
 
 func BenchmarkRedoLogReadInt(b *testing.B) {
-	setup()
 	j = pnew(int)
 	tx := transaction.NewRedoTx()
 	tx.Begin()
@@ -186,7 +175,6 @@ func BenchmarkRedoLogReadInt(b *testing.B) {
 }
 
 func BenchmarkRawReadInt(b *testing.B) {
-	setup()
 	j = pnew(int)
 	*j = b.N
 	b.ResetTimer()
@@ -208,7 +196,6 @@ func resetData() {
 }
 
 func TestUndoLogBasic(t *testing.T) {
-	setup()
 	resetData()
 	undoTx := transaction.NewUndoTx()
 	fmt.Println("Testing basic data type commit.")
@@ -345,7 +332,6 @@ func crashLargeUndoLog() {
 }
 
 func TestUndoLogCrash1(t *testing.T) {
-	setup()
 	resetData()
 	fmt.Println("Testing log crash due to TX being too big for UndoTx")
 	if os.Getenv("CRASH_RUN") == "1" {
@@ -362,7 +348,6 @@ func TestUndoLogCrash1(t *testing.T) {
 }
 
 func TestUndoLogCrash2(t *testing.T) {
-	setup()
 	resetData()
 	fmt.Println("Testing log crash due to TX being too big for LargeUndoTx")
 	if os.Getenv("CRASH_RUN") == "1" {
@@ -379,7 +364,6 @@ func TestUndoLogCrash2(t *testing.T) {
 }
 
 func TestConcurrentUndoLog(t *testing.T) {
-	setup()
 	resetData()
 	fmt.Println("Testing concurrent logging")
 	m1 := new(sync.RWMutex)
@@ -414,7 +398,6 @@ func TestConcurrentUndoLog(t *testing.T) {
 }
 
 func TestUndoLogNoIsolation(t *testing.T) {
-	setup()
 	resetData()
 	var wg sync.WaitGroup
 	chn0 := make(chan int)
@@ -454,7 +437,6 @@ func TestUndoLogNoIsolation(t *testing.T) {
 }
 
 func TestRedoLogBasic(t *testing.T) {
-	setup()
 	resetData()
 	var (
 		bTmp interface{}
@@ -680,7 +662,6 @@ func TestRedoLogBasic(t *testing.T) {
 }
 
 func TestRedoLogIsolation(t *testing.T) {
-	setup()
 	resetData()
 	var wg sync.WaitGroup
 	chn0 := make(chan int)

@@ -26,7 +26,6 @@ func addRet(tx transaction.TX, a *basic, b *basic) int {
 
 func TestExec(t *testing.T) {
 	// Set up pmem appRoot and header
-	setup()
 
 	var (
 		tx     transaction.TX
@@ -52,25 +51,25 @@ func TestExec(t *testing.T) {
 
 	fmt.Println("Testing with no arguments")
 	tx = transaction.NewUndoTx()
-	err, _ = tx.Exec()
+	_, err = tx.Exec()
 	transaction.Release(tx)
 	assertEqual(t, err.Error(), errNoArgs.Error())
 
 	fmt.Println("Testing when 1st argument is incorrect")
 	tx = transaction.NewUndoTx()
-	err, _ = tx.Exec(2, 3, add)
+	_, err = tx.Exec(2, 3, add)
 	transaction.Release(tx)
 	assertEqual(t, err.Error(), errFirstArg.Error())
 
 	fmt.Println("Testing when number of arguments don't match")
 	tx = transaction.NewUndoTx()
-	err, _ = tx.Exec(add, 2)
+	_, err = tx.Exec(add, 2)
 	transaction.Release(tx)
 	assertEqual(t, err.Error(), errNumArgs.Error())
 
 	fmt.Println("Testing when type of arguments don't match")
 	tx = transaction.NewUndoTx()
-	err, _ = tx.Exec(add, 2, 3)
+	_, err = tx.Exec(add, 2, 3)
 	transaction.Release(tx)
 	assertEqual(t, err.Error(), errTypeArgs.Error())
 
@@ -79,7 +78,7 @@ func TestExec(t *testing.T) {
 	a.i = 2
 	b.i = 3
 	tx = transaction.NewUndoTx()
-	err, _ = tx.Exec(func(tx transaction.TX) {
+	_, err = tx.Exec(func(tx transaction.TX) {
 		tx.Begin()
 		tx.Log(a)
 		a.i = a.i + b.i
@@ -93,7 +92,7 @@ func TestExec(t *testing.T) {
 	a.i = 20
 	b.i = 30
 	tx = transaction.NewUndoTx()
-	err, _ = tx.Exec(func(tx transaction.TX) {
+	_, err = tx.Exec(func(tx transaction.TX) {
 		tx.Begin()
 		tx.Log(a)
 		a.i = a.i + b.i
@@ -107,7 +106,7 @@ func TestExec(t *testing.T) {
 	a.i = 200
 	b.i = 300
 	tx = transaction.NewUndoTx()
-	err, _ = tx.Exec(func(tx transaction.TX) {
+	_, err = tx.Exec(func(tx transaction.TX) {
 		tx.Log(a)
 		a.i = a.i + b.i
 		tx.End()
@@ -120,7 +119,7 @@ func TestExec(t *testing.T) {
 	a.i = 2
 	b.i = 3
 	tx = transaction.NewUndoTx()
-	err, retVal = tx.Exec(add, a, b)
+	retVal, err = tx.Exec(add, a, b)
 	transaction.Release(tx)
 	assertEqual(t, err, errNil)
 	assertEqual(t, a.i, 5)
@@ -130,7 +129,7 @@ func TestExec(t *testing.T) {
 	a.i = 20
 	b.i = 30
 	tx = transaction.NewUndoTx()
-	err, retVal = tx.Exec(func(tx transaction.TX) {
+	retVal, err = tx.Exec(func(tx transaction.TX) {
 		tx.Log(a)
 		a.i = a.i + b.i
 		a.slice = append(a.slice, 40)
@@ -149,7 +148,7 @@ func TestExec(t *testing.T) {
 	b.i = 300
 	a.slice = pmake([]int, 0)
 	tx = transaction.NewUndoTx()
-	err, _ = tx.Exec(func(tx transaction.TX) {
+	_, err = tx.Exec(func(tx transaction.TX) {
 		tx.Log(a)
 		a.i = a.i + b.i
 		a.slice = append(a.slice, 400)
@@ -166,7 +165,7 @@ func TestExec(t *testing.T) {
 	a.i = 2000
 	b.i = 3000
 	tx = transaction.NewUndoTx()
-	err, _ = tx.Exec(func(tx transaction.TX) {
+	_, err = tx.Exec(func(tx transaction.TX) {
 		a.i = a.i + b.i
 		tx.Log(&a.slice)
 		a.slice = append(a.slice, 4000)
@@ -182,7 +181,7 @@ func TestExec(t *testing.T) {
 	a.i = 3
 	b.i = 6
 	tx = transaction.NewUndoTx()
-	err, retVal = tx.Exec(addRet, a, b)
+	retVal, err = tx.Exec(addRet, a, b)
 	transaction.Release(tx)
 	assertEqual(t, err, errNil)
 	assertEqual(t, len(retVal), 1)
@@ -192,7 +191,7 @@ func TestExec(t *testing.T) {
 	a.i = 30
 	b.i = 60
 	tx = transaction.NewUndoTx()
-	err, retVal = tx.Exec(func(tx transaction.TX) *basic {
+	retVal, err = tx.Exec(func(tx transaction.TX) *basic {
 		c := pnew(basic)
 		c.slice = pmake([]int, 0)
 		tx.Log(c)
