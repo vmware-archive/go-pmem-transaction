@@ -180,7 +180,7 @@ func (t *undoTx) updateLogTail(tail int) {
 	runtime.Fence()
 }
 
-type Value struct {
+type value struct {
 	typ  unsafe.Pointer
 	ptr  unsafe.Pointer
 	flag uintptr
@@ -216,9 +216,9 @@ func (t *undoTx) Log(data ...interface{}) error {
 		v1len := v1.Len()
 		size = v1len * int(typ.Elem().Size())
 		v2 = reflect.PMakeSlice(typ, v1len, v1len)
-		vptr := (*Value)(unsafe.Pointer(&v2))
+		vptr := (*value)(unsafe.Pointer(&v2))
 		vshdr := (*sliceHeader)(vptr.ptr)
-		sourceVal := (*Value)(unsafe.Pointer(&v1))
+		sourceVal := (*value)(unsafe.Pointer(&v1))
 		sshdr := (*sliceHeader)(sourceVal.ptr)
 		sourcePtr := (*[LBUFFERSIZE]byte)(sshdr.data)[:size:size]
 		destPtr := (*[LBUFFERSIZE]byte)(vshdr.data)[:size:size]

@@ -33,40 +33,41 @@ func init() {
 	pmem.Init("tx_testFile", dataSize, pmemOffset, gcPercent)
 }
 
-func TestPNewPMake(t *testing.T) {
+func TestNewMake(t *testing.T) {
 	tx := transaction.NewUndoTx()
 
-	// named PNew with int type
-	// cannot call pmem.PNew("region1", int) as this pmem package is outside
+	// named New with int type
+	// cannot call pmem.New("region1", int) as this pmem package is outside
 	// compiler
-	fmt.Println("Testing PNew int region1")
-	r1 := pmem.PNew("region1", a)
-	b := (*int)(r1)
+	fmt.Println("Testing New int region1")
+	b := new(int)
+	r1 := pmem.New("region1", *b)
+	b = (*int)(r1)
 	tx.Begin()
 	tx.Log(b)
 	*b = 10
 	tx.End() // since update is within log, no need to call persistRange
 	assertEqual(t, *(*int)(r1), 10)
-	r2 := pmem.PNew("region1", a)
+	r2 := pmem.New("region1", *b)
 	assertEqual(t, *(*int)(r2), 10) // Get back the same object
 
-	// named PMake for slice of integers
-	fmt.Println("Testing PMake []int region2")
-	r3 := pmem.PMake("region2", slice1, 10)
+	// named Make for slice of integers
+	fmt.Println("Testing Make []int region2")
+	r3 := pmem.Make("region2", slice1, 10)
 	s1 := *(*[]int)(r3)
 	tx.Begin()
 	tx.Log(s1)
 	s1[0] = 1
 	tx.End()
 
-	r4 := pmem.PMake("region2", slice1, 10) // Get back the same slice
+	r4 := pmem.Make("region2", slice1, 10) // Get back the same slice
 	s2 := *(*[]int)(r4)
 	assertEqual(t, s2[0], 1)
 	assertEqual(t, len(s2), 10)
 
-	// named PNew with struct type
-	fmt.Println("Testing PNew struct region3")
-	r5 := pmem.PNew("region3", struct1)
+	// named New with struct type
+	fmt.Println("Testing New struct region3")
+	r5 := pmem.New("region3", struct1)
 	st1 := (*structPmemTest)(r5)
 	tx.Begin()
 	tx.Log(st1)
@@ -78,7 +79,7 @@ func TestPNewPMake(t *testing.T) {
 	st1.slice[99] = 22
 	tx.End()
 
-	r7 := pmem.PNew("region3", struct1) // Get back the same struct
+	r7 := pmem.New("region3", struct1) // Get back the same struct
 	st2 := (*structPmemTest)(r7)
 	assertEqual(t, st2.a, 20)
 	assertEqual(t, st2.b, true)
@@ -93,17 +94,17 @@ func TestPNewPMake(t *testing.T) {
 
 func TestCrashRetention(t *testing.T) {
 	fmt.Println("Getting region1 int")
-	r1 := pmem.PNew("region1", a)
+	r1 := pmem.New("region1", a)
 	assertEqual(t, *(*int)(r1), 10)
 
 	fmt.Println("Getting region2 []int")
-	r2 := pmem.PMake("region2", slice1, 10)
+	r2 := pmem.Make("region2", slice1, 10)
 	s := *(*[]int)(r2)
 	assertEqual(t, s[0], 1)
 	assertEqual(t, len(s), 10)
 
 	fmt.Println("Getting region3 struct")
-	r1 = pmem.PNew("region3", struct1)
+	r1 = pmem.New("region3", struct1)
 	st := (*structPmemTest)(r1)
 	assertEqual(t, st.a, 20)
 	assertEqual(t, st.b, true)
