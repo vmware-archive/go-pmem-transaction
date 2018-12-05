@@ -11,6 +11,7 @@ import (
 type (
 	namedObject struct {
 		name string
+		typ  reflect.Type
 		ptr  unsafe.Pointer
 	}
 	pmemHeader struct {
@@ -69,28 +70,33 @@ type sliceHeader struct {
 	cap  int
 }
 
-// Make returns unsafe.Pointer to slice header for a slice created in persistent
-// heap. Only supports slices for now.
+// Make returns the interface to the slice asked for, slice being created in
+// persistent heap. Only supports slices for now.
 // Syntax: Make("myName", []int, 10)
-func Make(name string, intf ...interface{}) unsafe.Pointer {
+func Make(name string, intf ...interface{}) interface{} {
 	v1 := reflect.ValueOf(intf[0])
 	if v1.Kind() != reflect.Slice {
 		log.Fatal("Can only pmem.Make slice")
 	}
+	sTyp := v1.Type()
 	for i, obj := range rootPtr.appData {
 		if obj.name == name {
-			return rootPtr.appData[i].ptr
+			if obj.typ != sTyp {
+				log.Fatal("Object was made before with type", obj.typ)
+			}
+			slicePtrWithTyp := reflect.NewAt(sTyp, rootPtr.appData[i].ptr)
+			sliceVal := reflect.Indirect(slicePtrWithTyp)
+			return sliceVal.Interface()
 		}
 	}
 	v2 := reflect.ValueOf(intf[1])
-	sTyp := v1.Type()
 	sLen := int(v2.Int())
 	newV := reflect.PMakeSlice(sTyp, sLen, sLen)
 	vPtr := (*value)(unsafe.Pointer(&newV))
 	sliceHdr := pnew(sliceHeader)
 	*sliceHdr = *(*sliceHeader)(vPtr.ptr)
 	runtime.PersistRange(unsafe.Pointer(sliceHdr), unsafe.Sizeof(*sliceHdr))
-	newNamedObj := namedObject{name, unsafe.Pointer(sliceHdr)}
+	newNamedObj := namedObject{name, sTyp, unsafe.Pointer(sliceHdr)}
 	tx := transaction.NewUndoTx()
 	tx.Begin()
 	tx.Log(&rootPtr.appData)
@@ -99,7 +105,9 @@ func Make(name string, intf ...interface{}) unsafe.Pointer {
 		uintptr(len(rootPtr.appData))*unsafe.Sizeof(newNamedObj))
 	tx.End()
 	transaction.Release(tx)
-	return unsafe.Pointer(sliceHdr)
+	slicePtrWithTyp := reflect.NewAt(sTyp, unsafe.Pointer(sliceHdr))
+	sliceVal := reflect.Indirect(slicePtrWithTyp)
+	return sliceVal.Interface()
 }
 
 // New is used to create named objects in persistent heap. This object would
@@ -107,13 +115,18 @@ func Make(name string, intf ...interface{}) unsafe.Pointer {
 // If an object with same name is found, pointer to the existing object is
 // returned else a new object is allocated & persisted.
 func New(name string, intf interface{}) unsafe.Pointer {
+	v := reflect.ValueOf(intf)
+	t := v.Type()
 	for i, obj := range rootPtr.appData {
 		if obj.name == name {
+			if obj.typ != t {
+				log.Fatal("Object was made before with type ", obj.typ)
+			}
 			return rootPtr.appData[i].ptr
 		}
 	}
-	newObj := reflect.PNew(reflect.TypeOf(intf))
-	newNamedObj := namedObject{name, unsafe.Pointer(newObj.Pointer())}
+	newObj := reflect.PNew(t.Elem()) //Elem() returns type of object t points to
+	newNamedObj := namedObject{name, t, unsafe.Pointer(newObj.Pointer())}
 	tx := transaction.NewUndoTx()
 	tx.Begin()
 	tx.Log(&rootPtr.appData)

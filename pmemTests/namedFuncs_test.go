@@ -23,52 +23,44 @@ type structPmemTest struct {
 	b     bool
 }
 
-var (
-	a       int
-	slice1  []int
-	struct1 structPmemTest
-)
-
 func init() {
 	pmem.Init("tx_testFile", dataSize, pmemOffset, gcPercent)
 }
 
 func TestNewMake(t *testing.T) {
 	tx := transaction.NewUndoTx()
-
 	// named New with int type
 	// cannot call pmem.New("region1", int) as this pmem package is outside
 	// compiler
 	fmt.Println("Testing New int region1")
-	b := new(int)
-	r1 := pmem.New("region1", *b)
-	b = (*int)(r1)
+	var a *int
+	a = (*int)(pmem.New("region1", a))
 	tx.Begin()
-	tx.Log(b)
-	*b = 10
+	tx.Log(a)
+	*a = 10
 	tx.End() // since update is within log, no need to call persistRange
-	assertEqual(t, *(*int)(r1), 10)
-	r2 := pmem.New("region1", *b)
-	assertEqual(t, *(*int)(r2), 10) // Get back the same object
+	assertEqual(t, *a, 10)
+	var b *int
+	b = (*int)(pmem.New("region1", b))
+	assertEqual(t, *b, 10)
 
 	// named Make for slice of integers
-	fmt.Println("Testing Make []int region2")
-	r3 := pmem.Make("region2", slice1, 10)
-	s1 := *(*[]int)(r3)
+	fmt.Println("Testing Make []float64 region2")
+	var slice1 []float64
+	slice1 = pmem.Make("region2", slice1, 10).([]float64)
 	tx.Begin()
-	tx.Log(s1)
-	s1[0] = 1
+	tx.Log(slice1)
+	slice1[0] = 1.1
 	tx.End()
-
-	r4 := pmem.Make("region2", slice1, 10) // Get back the same slice
-	s2 := *(*[]int)(r4)
-	assertEqual(t, s2[0], 1)
-	assertEqual(t, len(s2), 10)
+	var slice2 []float64
+	slice2 = pmem.Make("region2", slice2, 10).([]float64) // Get back same slice
+	assertEqual(t, slice2[0], 1.1)
+	assertEqual(t, len(slice2), 10)
 
 	// named New with struct type
 	fmt.Println("Testing New struct region3")
-	r5 := pmem.New("region3", struct1)
-	st1 := (*structPmemTest)(r5)
+	var st1 *structPmemTest
+	st1 = (*structPmemTest)(pmem.New("region3", st1))
 	tx.Begin()
 	tx.Log(st1)
 	st1.a = 20
@@ -79,8 +71,8 @@ func TestNewMake(t *testing.T) {
 	st1.slice[99] = 22
 	tx.End()
 
-	r7 := pmem.New("region3", struct1) // Get back the same struct
-	st2 := (*structPmemTest)(r7)
+	var st2 *structPmemTest
+	st2 = (*structPmemTest)(pmem.New("region3", st2)) // Get back the same struct
 	assertEqual(t, st2.a, 20)
 	assertEqual(t, st2.b, true)
 	assertEqual(t, len(st2.slice), 100)
@@ -94,18 +86,19 @@ func TestNewMake(t *testing.T) {
 
 func TestCrashRetention(t *testing.T) {
 	fmt.Println("Getting region1 int")
-	r1 := pmem.New("region1", a)
-	assertEqual(t, *(*int)(r1), 10)
+	var a *int
+	a = (*int)(pmem.New("region1", a))
+	assertEqual(t, *a, 10)
 
-	fmt.Println("Getting region2 []int")
-	r2 := pmem.Make("region2", slice1, 10)
-	s := *(*[]int)(r2)
-	assertEqual(t, s[0], 1)
+	fmt.Println("Getting region2 []float64")
+	var s []float64
+	s = pmem.Make("region2", s, 10).([]float64)
+	assertEqual(t, s[0], 1.1)
 	assertEqual(t, len(s), 10)
 
 	fmt.Println("Getting region3 struct")
-	r1 = pmem.New("region3", struct1)
-	st := (*structPmemTest)(r1)
+	var st *structPmemTest
+	st = (*structPmemTest)(pmem.New("region3", st))
 	assertEqual(t, st.a, 20)
 	assertEqual(t, st.b, true)
 	assertEqual(t, len(st.slice), 100)
