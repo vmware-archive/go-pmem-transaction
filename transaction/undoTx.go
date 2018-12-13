@@ -39,6 +39,7 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/debug"
+	"sync"
 	"unsafe"
 )
 
@@ -58,8 +59,10 @@ type (
 		tail int
 
 		// Level of nesting. Needed for nested transactions
-		level int
-		large bool
+		level  int
+		large  bool
+		rlocks []*sync.RWMutex
+		wlocks []*sync.RWMutex
 	}
 
 	undoTxHeader struct {
@@ -109,16 +112,18 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 		}
 
 		// Recover data from previous pending transactions, if any
-		for i := 0; i < SLOGNUM; i++ {
-			tx := txHeaderPtr.sLogPtr[i]
-			tx.abort()
-		}
-		for i := 0; i < LLOGNUM; i++ {
-			tx := txHeaderPtr.lLogPtr[i]
+		var tx *undoTx
+		for i := 0; i < SLOGNUM+LLOGNUM; i++ {
+			if i < SLOGNUM {
+				tx = txHeaderPtr.sLogPtr[i]
+			} else {
+				tx = txHeaderPtr.lLogPtr[i-SLOGNUM]
+			}
+			tx.wlocks = make([]*sync.RWMutex, 0, 0) // Resetting volatile locks
+			tx.rlocks = make([]*sync.RWMutex, 0, 0) // before checking for data
 			tx.abort()
 		}
 	}
-
 	undoPool[0] = make(chan *undoTx, SLOGNUM)
 	undoPool[1] = make(chan *undoTx, LLOGNUM)
 	for i := 0; i < SLOGNUM; i++ {
@@ -137,6 +142,8 @@ func _initUndoTx(size int) *undoTx {
 	}
 	tx.log = pmake([]entry, size)
 	runtime.PersistRange(unsafe.Pointer(tx), unsafe.Sizeof(*tx))
+	tx.wlocks = make([]*sync.RWMutex, 0, 0)
+	tx.rlocks = make([]*sync.RWMutex, 0, 0)
 	return tx
 }
 
@@ -193,8 +200,9 @@ type sliceHeader struct {
 	cap  int
 }
 
-func (t *undoTx) ReadLog(interface{}) (retVal interface{}, err error) {
-	return retVal, errors.New("[undoTx] ReadLog: undoTx doesn't support this")
+func (t *undoTx) ReadLog(interface{}) (retVal interface{}) {
+	// undoTx doesn't support this. TODO: Should we panic here?
+	return retVal
 }
 
 func (t *undoTx) Log(data ...interface{}) error {
@@ -324,6 +332,8 @@ func (t *undoTx) End() error {
 	}
 	t.level--
 	if t.level == 0 {
+		defer t.unLock()
+
 		// Need to flush current value of logged areas
 		for i := t.tail - 1; i >= 0; i-- {
 			runtime.PersistRange(t.log[i].ptr, uintptr(t.log[i].size))
@@ -333,7 +343,33 @@ func (t *undoTx) End() error {
 	return nil
 }
 
+func (t *undoTx) RLock(m *sync.RWMutex) {
+	m.RLock()
+	t.rlocks = append(t.rlocks, m)
+}
+
+func (t *undoTx) WLock(m *sync.RWMutex) {
+	m.Lock()
+	t.wlocks = append(t.wlocks, m)
+}
+
+func (t *undoTx) Lock(m *sync.RWMutex) {
+	t.WLock(m)
+}
+
+func (t *undoTx) unLock() {
+	for _, m := range t.wlocks {
+		m.Unlock()
+	}
+	t.wlocks = make([]*sync.RWMutex, 0, 0)
+	for _, m := range t.rlocks {
+		m.RUnlock()
+	}
+	t.rlocks = make([]*sync.RWMutex, 0, 0)
+}
+
 func (t *undoTx) abort() error {
+	defer t.unLock()
 	if t.tail == 0 {
 		// Nothing stored in this log
 		return nil

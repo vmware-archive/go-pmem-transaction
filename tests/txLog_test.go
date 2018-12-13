@@ -167,7 +167,7 @@ func BenchmarkRedoLogReadInt(b *testing.B) {
 	tx.Log(j, b.N)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		a, _ := tx.ReadLog(j)
+		a := tx.ReadLog(j)
 		_ = a
 	}
 	tx.End()
@@ -449,8 +449,8 @@ func TestRedoLogBasic(t *testing.T) {
 	redoTx.Begin()
 	redoTx.Log(b, true)
 	redoTx.Log(j, 10)
-	bTmp, _ = redoTx.ReadLog(b)
-	jTmp, _ = redoTx.ReadLog(j)
+	bTmp = redoTx.ReadLog(b)
+	jTmp = redoTx.ReadLog(j)
 	assertEqual(t, *b, false)
 	assertEqual(t, *j, 0)
 	assertEqual(t, bTmp.(bool), true)
@@ -463,16 +463,16 @@ func TestRedoLogBasic(t *testing.T) {
 	redoTx.Begin()
 	redoTx.Log(b, false)
 	redoTx.Log(j, 20)
-	bTmp, _ = redoTx.ReadLog(b)
-	jTmp, _ = redoTx.ReadLog(j)
+	bTmp = redoTx.ReadLog(b)
+	jTmp = redoTx.ReadLog(j)
 	assertEqual(t, bTmp.(bool), false)
 	assertEqual(t, jTmp.(int), 20)
 	redoTx.Log(b, true)
 	redoTx.Log(j, 30)
 	assertEqual(t, *b, true)
 	assertEqual(t, *j, 10)
-	bTmp, _ = redoTx.ReadLog(b)
-	jTmp, _ = redoTx.ReadLog(j)
+	bTmp = redoTx.ReadLog(b)
+	jTmp = redoTx.ReadLog(j)
 	assertEqual(t, bTmp.(bool), true)
 	assertEqual(t, jTmp.(int), 30)
 	redoTx.End()
@@ -483,8 +483,8 @@ func TestRedoLogBasic(t *testing.T) {
 	redoTx.Begin()
 	redoTx.Log(b, false)
 	redoTx.Log(j, 40)
-	bTmp, _ = redoTx.ReadLog(b)
-	jTmp, _ = redoTx.ReadLog(j)
+	bTmp = redoTx.ReadLog(b)
+	jTmp = redoTx.ReadLog(j)
 	assertEqual(t, bTmp.(bool), false)
 	assertEqual(t, jTmp.(int), 40)
 	transaction.Release(redoTx) // Calls abort internally
@@ -507,7 +507,7 @@ func TestRedoLogBasic(t *testing.T) {
 	redoTx = transaction.NewRedoTx()
 	redoTx.Begin()
 	redoTx.Log(basicStruct1, *basicStruct2)
-	tmpBasicStruct, _ := redoTx.ReadLog(basicStruct1)
+	tmpBasicStruct := redoTx.ReadLog(basicStruct1)
 	assertEqual(t, tmpBasicStruct.(structRedoBasic), *basicStruct2)
 	assertEqual(t, basicStruct1.I, 0)
 	assertEqual(t, basicStruct1.B, false)
@@ -522,7 +522,7 @@ func TestRedoLogBasic(t *testing.T) {
 	redoTx = transaction.NewRedoTx()
 	redoTx.Begin()
 	redoTx.Log(basicStruct1, *basicStruct2)
-	tmpBasicStruct, _ = redoTx.ReadLog(basicStruct1)
+	tmpBasicStruct = redoTx.ReadLog(basicStruct1)
 	assertEqual(t, tmpBasicStruct.(structRedoBasic), *basicStruct2)
 	redoTx.Log(&basicStruct1.S, "Hello2")
 	redoTx.Log(&basicStruct1.I, 20)
@@ -538,7 +538,7 @@ func TestRedoLogBasic(t *testing.T) {
 	basicStruct2.S = "Hello3"
 	redoTx.Begin()
 	redoTx.Log(basicStruct1, *basicStruct2)
-	tmpBasicStruct, _ = redoTx.ReadLog(basicStruct1)
+	tmpBasicStruct = redoTx.ReadLog(basicStruct1)
 	assertEqual(t, tmpBasicStruct.(structRedoBasic).I, 30)
 	assertEqual(t, *(tmpBasicStruct.(structRedoBasic).Iptr), 30)
 	assertEqual(t, tmpBasicStruct.(structRedoBasic).B, false)
@@ -576,7 +576,7 @@ func TestRedoLogBasic(t *testing.T) {
 	redoTx = transaction.NewRedoTx()
 	redoTx.Begin()
 	redoTx.Log(nestedStruct1, *nestedStruct2)
-	tmpNestedStruct, _ := redoTx.ReadLog(nestedStruct1)
+	tmpNestedStruct := redoTx.ReadLog(nestedStruct1)
 	assertEqual(t, tmpNestedStruct.(structRedoNested), *nestedStruct2)
 	assertEqual(t, nestedStruct1.I, 0)
 	assertEqual(t, nestedStruct1.B, false)
@@ -659,6 +659,62 @@ func TestRedoLogBasic(t *testing.T) {
 	assertEqual(t, slice1[8], 0)
 	assertEqual(t, slice1[12], 0)
 	assertEqual(t, slice1[99], 99)
+
+	fmt.Println("Testing read for data not logged before")
+	redoTx = transaction.NewRedoTx()
+	redoTx.Begin()
+	tmpNestedStruct1 := redoTx.ReadLog(nestedStruct1)
+	redoTx.End()
+	nestedStruct3 := tmpNestedStruct1.(structRedoNested)
+	transaction.Release(redoTx)
+	assertEqual(t, nestedStruct3, *nestedStruct1)
+
+	type structRedoUnexportedField struct {
+		i    int
+		b    bool
+		iptr *int
+		uptr unsafe.Pointer
+		Intf interface{} // okay to log exported interface variables
+	}
+	st1 := pnew(structRedoUnexportedField)
+	st2 := pnew(structRedoUnexportedField)
+	st1.Intf = 20
+	st1.i = 10
+	st1.b = true
+	st1.iptr = &st1.i
+	st1.uptr = unsafe.Pointer(&st1.b)
+	fmt.Println("Testing logging for unexported fields of struct")
+	redoTx = transaction.NewRedoTx()
+	redoTx.Begin()
+	redoTx.Log(st2, *st1)
+	tmp1 := redoTx.ReadLog(&st2.iptr)
+	assertEqual(t, tmp1.(*int), st1.iptr)
+	tmp2 := redoTx.ReadLog(&st2.uptr)
+	assertEqual(t, tmp2.(unsafe.Pointer), st1.uptr)
+	tmp3 := redoTx.ReadLog(&st2.Intf)
+	assertEqual(t, tmp3.(int), 20)
+	redoTx.End()
+	assertEqual(t, *st2, *st1)
+
+	fmt.Println("Testing logging for nil values")
+	doublePtr := pnew(*int)
+	doublePtr = &st1.iptr
+	redoTx.Begin()
+	redoTx.Log(doublePtr, nil)
+	redoTx.End()
+	if *doublePtr != nil {
+		assertEqual(t, 0, 1) // Assert
+	}
+
+	fmt.Println("Testing read for nil value")
+	doublePtr1 := pnew(*int)
+	redoTx.Begin()
+	tmp1 = redoTx.ReadLog(doublePtr1).(*int)
+	if tmp1.(*int) != nil {
+		assertEqual(t, 0, 1)
+	}
+	redoTx.End()
+	transaction.Release(redoTx)
 }
 
 func TestRedoLogIsolation(t *testing.T) {

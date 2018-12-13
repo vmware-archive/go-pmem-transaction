@@ -3,6 +3,7 @@ package transaction
 import (
 	"log"
 	"reflect"
+	"sync"
 	"unsafe"
 )
 
@@ -17,9 +18,12 @@ type (
 	TX interface {
 		Begin() error
 		Log(...interface{}) error
-		ReadLog(interface{}) (interface{}, error)
+		ReadLog(interface{}) interface{}
 		Exec(...interface{}) ([]reflect.Value, error)
 		End() error
+		RLock(*sync.RWMutex)
+		WLock(*sync.RWMutex)
+		Lock(*sync.RWMutex)
 		abort() error
 	}
 )
