@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"go-pmem-transaction/pmem"
 	"go-pmem-transaction/transaction"
+	"os"
+	"os/exec"
 	"runtime/debug"
 	"testing"
 	"time"
@@ -27,7 +29,7 @@ func init() {
 	pmem.Init("tx_testFile", dataSize, pmemOffset, gcPercent)
 }
 
-func TestNewMake(t *testing.T) {
+func TestAPIs(t *testing.T) {
 	tx := transaction.NewUndoTx()
 	// named New with int type
 	// cannot call pmem.New("region1", int) as this pmem package is outside
@@ -41,7 +43,7 @@ func TestNewMake(t *testing.T) {
 	tx.End() // since update is within log, no need to call persistRange
 	assertEqual(t, *a, 10)
 	var b *int
-	b = (*int)(pmem.New("region1", b))
+	b = (*int)(pmem.Get("region1", b))
 	assertEqual(t, *b, 10)
 
 	// named Make for slice of integers
@@ -53,7 +55,7 @@ func TestNewMake(t *testing.T) {
 	slice1[0] = 1.1
 	tx.End()
 	var slice2 []float64
-	slice2 = pmem.Make("region2", slice2, 10).([]float64) // Get back same slice
+	slice2 = pmem.GetSlice("region2", slice2, 10).([]float64) // Get same slice
 	assertEqual(t, slice2[0], 1.1)
 	assertEqual(t, len(slice2), 10)
 
@@ -70,14 +72,55 @@ func TestNewMake(t *testing.T) {
 	st1.slice[0] = 11
 	st1.slice[99] = 22
 	tx.End()
-
 	var st2 *structPmemTest
-	st2 = (*structPmemTest)(pmem.New("region3", st2)) // Get back the same struct
+	st2 = (*structPmemTest)(pmem.Get("region3", st2)) // Get back same struct
 	assertEqual(t, st2.a, 20)
 	assertEqual(t, st2.b, true)
 	assertEqual(t, len(st2.slice), 100)
 	assertEqual(t, st2.slice[0], 11)
 	assertEqual(t, st2.slice[99], 22)
+
+	fmt.Println("Testing Delete with int & region4")
+	var c *int
+	c = (*int)(pmem.New("region4", c))
+	tx.Begin()
+	tx.Log(c)
+	*c = 100
+	tx.End()
+	if err := pmem.Delete("region4"); err != nil {
+		assert(t)
+	}
+	if err1 := pmem.Delete("region4"); err1 == nil { // This should return error
+		assert(t)
+	}
+	c = (*int)(pmem.New("region4", c))
+	assertEqual(t, *c, 0) // above New() call would have allocated a new int
+	pmem.Delete("region4")
+
+	fmt.Println("Testing Update")
+	var st3 *structPmemTest
+	st3 = (*structPmemTest)(pmem.New("region4", st3))
+	tx.Begin()
+	tx.Log(st3)
+	*st3 = *st2
+	tx.End()
+	assertEqual(t, st2.a, st3.a)
+	assertEqual(t, st2.b, st3.b)
+	assertEqual(t, st2.sptr, st3.sptr)
+	assertEqual(t, len(st2.slice), len(st3.slice))
+	assertEqual(t, st2.slice[0], st3.slice[0])
+	assertEqual(t, st2.slice[99], st3.slice[99])
+	if pmem.Get("region4", st3) == nil {
+		assert(t)
+	}
+	var d *int
+	d = (*int)(pmem.New("region4", d))
+	assertEqual(t, *d, 0)
+	*d = 1
+	if pmem.Get("region4", d) == nil {
+		assert(t)
+	}
+
 	transaction.Release(tx)
 	fmt.Println("Going to sleep for 10s. Crash here & run TestCrashRetention" +
 		" to test crash consistency")
@@ -87,23 +130,105 @@ func TestNewMake(t *testing.T) {
 func TestCrashRetention(t *testing.T) {
 	fmt.Println("Getting region1 int")
 	var a *int
-	a = (*int)(pmem.New("region1", a))
+	a = (*int)(pmem.Get("region1", a))
 	assertEqual(t, *a, 10)
 
 	fmt.Println("Getting region2 []float64")
 	var s []float64
-	s = pmem.Make("region2", s, 10).([]float64)
+	s = pmem.GetSlice("region2", s, 10).([]float64)
 	assertEqual(t, s[0], 1.1)
 	assertEqual(t, len(s), 10)
 
 	fmt.Println("Getting region3 struct")
 	var st *structPmemTest
-	st = (*structPmemTest)(pmem.New("region3", st))
+	st = (*structPmemTest)(pmem.Get("region3", st))
 	assertEqual(t, st.a, 20)
 	assertEqual(t, st.b, true)
 	assertEqual(t, len(st.slice), 100)
 	assertEqual(t, st.slice[0], 11)
 	assertEqual(t, st.slice[99], 22)
+
+	fmt.Println("Getting region4 which was updated to int")
+	var b *int
+	b = (*int)(pmem.Get("region4", b))
+	assertEqual(t, *b, 1)
+}
+
+func apiCrash1() {
+	var a *int
+	a = (*int)(pmem.New("region5", a))
+	var b *float64
+	b = (*float64)(pmem.Get("region5", b))
+}
+
+func apiCrash2() {
+	var a []int
+	a = pmem.Make("region6", a, 10).([]int)
+	var b []float64
+	b = pmem.GetSlice("region6", b).([]float64)
+}
+
+func apiCrash3() {
+	var a *int
+	a = (pmem.Make("region7", a, 10)).(*int)
+}
+
+func TestAPICrash1(t *testing.T) {
+	fmt.Println("Testing API crash for New() & Get()")
+	if os.Getenv("CRASH_RUN") == "1" {
+		apiCrash1()
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestAPICrash1")
+	cmd.Env = append(os.Environ(), "CRASH_RUN=1")
+	err := cmd.Run()
+	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
+		if pmem.Delete("region5") != nil {
+			assert(t)
+		}
+		return
+	}
+	t.Fatalf("process ran with err %v, want exit status 1", err)
+}
+
+func TestAPICrash2(t *testing.T) {
+	fmt.Println("Testing API crash for Make() & GetSlice()")
+	if os.Getenv("CRASH_RUN") == "1" {
+		apiCrash2()
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestAPICrash2")
+	cmd.Env = append(os.Environ(), "CRASH_RUN=1")
+	err := cmd.Run()
+	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
+		if pmem.Delete("region6") != nil {
+			assert(t)
+		}
+		return
+	}
+	t.Fatalf("process ran with err %v, want exit status 1", err)
+}
+
+func TestAPICrash3(t *testing.T) {
+	fmt.Println("Testing API crash for incorrect args to Make()")
+	if os.Getenv("CRASH_RUN") == "1" {
+		apiCrash3()
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestAPICrash3")
+	cmd.Env = append(os.Environ(), "CRASH_RUN=1")
+	err := cmd.Run()
+	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
+		if pmem.Delete("region7") == nil { // region 7 should not be created
+			assert(t)
+		}
+		return
+	}
+	t.Fatalf("process ran with err %v, want exit status 1", err)
+}
+
+func assert(t *testing.T) {
+	assertEqual(t, 0, 1)
 }
 
 func assertEqual(t *testing.T, a interface{}, b interface{}) {
