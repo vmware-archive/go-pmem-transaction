@@ -47,9 +47,10 @@ type (
 	/* entry for each undo log update, stay in persistent heap with pointer
 	to data copy */
 	entry struct {
-		ptr  unsafe.Pointer
-		data unsafe.Pointer
-		size int
+		ptr           unsafe.Pointer
+		data          unsafe.Pointer
+		size          int
+		sliceElemSize int // Non-zero value indicates ptr points to slice header
 	}
 
 	undoTx struct {
@@ -210,39 +211,60 @@ func (t *undoTx) Log(data ...interface{}) error {
 		return errors.New("[undoTx] Log: Incorrectly used. Correct usage: " +
 			"Log(ptr) OR Log(slice)")
 	}
-
-	// Check data type, allocate and assign copy of data.
-	var (
-		v1   reflect.Value = reflect.ValueOf(data[0])
-		v2   reflect.Value
-		typ  reflect.Type
-		size int
-	)
+	v1 := reflect.ValueOf(data[0])
+	if !runtime.InPmem(v1.Pointer()) {
+		return errors.New("[undoTx] Log: Can't log data in volatile memory")
+	}
 	switch kind := v1.Kind(); kind {
 	case reflect.Slice:
-		typ = v1.Type()
-		v1len := v1.Len()
-		size = v1len * int(typ.Elem().Size())
-		v2 = reflect.PMakeSlice(typ, v1len, v1len)
-		vptr := (*Value)(unsafe.Pointer(&v2))
-		vshdr := (*sliceHeader)(vptr.ptr)
-		sourceVal := (*Value)(unsafe.Pointer(&v1))
-		sshdr := (*sliceHeader)(sourceVal.ptr)
-		sourcePtr := (*[LBUFFERSIZE]byte)(sshdr.data)[:size:size]
-		destPtr := (*[LBUFFERSIZE]byte)(vshdr.data)[:size:size]
-		copy(destPtr, sourcePtr)
+		t.logSlice(v1)
 	case reflect.Ptr:
+		tail := t.tail
 		oldv := reflect.Indirect(v1) // get the underlying data of pointer
-		typ = oldv.Type()
-		size = int(typ.Size())
-		v2 = reflect.PNew(oldv.Type())
+		typ := oldv.Type()
+		if oldv.Kind() == reflect.Slice {
+			// store size of each slice element. Used later during t.End()
+			t.log[tail].sliceElemSize = int(typ.Elem().Size())
+		}
+		size := int(typ.Size())
+		v2 := reflect.PNew(oldv.Type())
 		reflect.Indirect(v2).Set(oldv) // copy old data
+
+		// Append data to log entry.
+		t.log[tail].ptr = unsafe.Pointer(v1.Pointer())  // point to orignal data
+		t.log[tail].data = unsafe.Pointer(v2.Pointer()) // point to logged copy
+		t.log[tail].size = size                         // size of data
+
+		// Flush logged data copy and entry.
+		runtime.PersistRange(t.log[tail].data, uintptr(size))
+		runtime.PersistRange(unsafe.Pointer(&t.log[tail]),
+			unsafe.Sizeof(t.log[tail]))
+
+		// Update log offset in header.
+		t.updateLogTail(tail + 1)
+		if oldv.Kind() == reflect.Slice {
+			// Pointer to slice was passed to Log(). So, log slice elements too
+			t.logSlice(oldv)
+		}
 	default:
 		debug.PrintStack()
-		return errors.New("[undoTx] Log: data must be pointer/slice!")
+		return errors.New("[undoTx] Log: data must be pointer/slice")
 	}
+	return nil
+}
 
-	// Append data to log entry.
+func (t *undoTx) logSlice(v1 reflect.Value) {
+	typ := v1.Type()
+	v1len := v1.Len()
+	size := v1len * int(typ.Elem().Size())
+	v2 := reflect.PMakeSlice(typ, v1len, v1len)
+	vptr := (*Value)(unsafe.Pointer(&v2))
+	vshdr := (*sliceHeader)(vptr.ptr)
+	sourceVal := (*Value)(unsafe.Pointer(&v1))
+	sshdr := (*sliceHeader)(sourceVal.ptr)
+	sourcePtr := (*[LBUFFERSIZE]byte)(sshdr.data)[:size:size]
+	destPtr := (*[LBUFFERSIZE]byte)(vshdr.data)[:size:size]
+	copy(destPtr, sourcePtr)
 	tail := t.tail
 	t.log[tail].ptr = unsafe.Pointer(v1.Pointer())  // point to original data
 	t.log[tail].data = unsafe.Pointer(v2.Pointer()) // point to logged copy
@@ -255,7 +277,6 @@ func (t *undoTx) Log(data ...interface{}) error {
 
 	// Update log offset in header.
 	t.updateLogTail(tail + 1)
-	return nil
 }
 
 /* Exec function receives a variable number of interfaces as its arguments.
@@ -337,6 +358,14 @@ func (t *undoTx) End() error {
 		// Need to flush current value of logged areas
 		for i := t.tail - 1; i >= 0; i-- {
 			runtime.PersistRange(t.log[i].ptr, uintptr(t.log[i].size))
+			if t.log[i].sliceElemSize != 0 {
+				// ptr points to sliceHeader. So, need to persist the slice too
+				// TODO: We can discard the original slice & skip in this loop
+				shdr := (*sliceHeader)(t.log[i].ptr)
+				runtime.PersistRange(shdr.data, uintptr(shdr.len*
+					t.log[i].sliceElemSize))
+				t.log[i].sliceElemSize = 0 // reset
+			}
 		}
 		t.updateLogTail(0) // discard all logs.
 	}

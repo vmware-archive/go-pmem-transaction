@@ -1,6 +1,7 @@
 package txTests
 
 import (
+	"errors"
 	"fmt"
 	"go-pmem-transaction/transaction"
 	"os"
@@ -291,7 +292,7 @@ func TestUndoLogBasic(t *testing.T) {
 	assertEqual(t, *struct1.iptr, 1000)
 	assertEqual(t, struct1.slice[0], slice2[0])
 
-	fmt.Println("Testing slice commit.")
+	fmt.Println("Testing slice element update commit.")
 	undoTx = transaction.NewUndoTx()
 	undoTx.Begin()
 	undoTx.Log(slice1)
@@ -299,7 +300,7 @@ func TestUndoLogBasic(t *testing.T) {
 	undoTx.End()
 	assertEqual(t, slice1[99], 99)
 
-	fmt.Println("Testing slice abort.")
+	fmt.Println("Testing slice element update abort.")
 	undoTx.Begin()
 	undoTx.Log(slice1[:10])
 	slice2[9] = 9
@@ -309,6 +310,58 @@ func TestUndoLogBasic(t *testing.T) {
 	assertEqual(t, slice1[9], 0)
 	assertEqual(t, slice1[10], 10)
 	assertEqual(t, slice1[99], 0)
+
+	fmt.Println("Testing slice append commit.")
+	struct1.slice = pmake([]int, 100)
+	undoTx = transaction.NewUndoTx()
+	undoTx.Begin()
+	undoTx.Log(&struct1.slice) // This would log slice header & slice elements
+	struct1.slice[10] = 11
+	struct1.slice = append(struct1.slice, 101)
+	struct1.slice[100] = 101
+	undoTx.End()
+	assertEqual(t, struct1.slice[10], 11)
+	assertEqual(t, struct1.slice[100], 101)
+	assertEqual(t, len(struct1.slice), 101)
+
+	fmt.Println("Testing slice append abort.")
+	struct2.slice = pmake([]int, 90)
+	undoTx.Begin()
+	undoTx.Log(&struct2.slice)
+	struct2.slice[10] = 10
+	struct2.slice = append(struct2.slice, 1) // causes slice header update
+	transaction.Release(undoTx)
+	assertEqual(t, len(struct2.slice), 90)
+	assertEqual(t, struct2.slice[10], 0)
+	undoTx = transaction.NewUndoTx()
+	struct2.slice = pmake([]int, 100)
+	struct2.slice = append(struct2.slice, 1)
+	undoTx.Begin()
+	undoTx.Log(&struct2.slice)
+	struct2.slice = append(struct2.slice, 1) // no slice header update
+	struct2.slice[20] = 20
+	transaction.Release(undoTx)
+	assertEqual(t, len(struct2.slice), 101)
+	assertEqual(t, struct2.slice[20], 0)
+
+	fmt.Println("Testing error for logging data in volatile memory")
+	errVolData := errors.New("[undoTx] Log: Can't log data in volatile memory")
+	x := new(int)
+	undoTx = transaction.NewUndoTx()
+	undoTx.Begin()
+	err := undoTx.Log(x)
+	assertEqual(t, err.Error(), errVolData.Error())
+	*x = 1
+	transaction.Release(undoTx)
+	assertEqual(t, *x, 1) // x was not logged, so update not rolled back
+	undoTx = transaction.NewUndoTx()
+	undoTx.Begin()
+	y := make([]int, 10)
+	err = undoTx.Log(y)
+	assertEqual(t, err.Error(), errVolData.Error())
+	y[0] = 10
+	transaction.Release(undoTx)
+	assertEqual(t, y[0], 10)
 }
 
 func crashUndoLog() {
@@ -638,7 +691,7 @@ func TestRedoLogBasic(t *testing.T) {
 	assertEqual(t, nestedStruct1.Sbasic.B, true)
 	assertEqual(t, nestedStruct1.Sbasic.S, "World3")
 
-	fmt.Println("Testing slice commit.")
+	fmt.Println("Testing slice element update commit.")
 	slice2[99] = 99
 	redoTx = transaction.NewRedoTx()
 	redoTx.Begin()
@@ -648,7 +701,7 @@ func TestRedoLogBasic(t *testing.T) {
 	assertEqual(t, slice1[98], 98)
 	assertEqual(t, slice1[99], 99)
 
-	fmt.Println("Testing slice abort.")
+	fmt.Println("Testing slice update abort.")
 	slice2[9] = 9
 	redoTx.Begin()
 	redoTx.Log(slice1[:10], slice2[:10])
@@ -715,6 +768,65 @@ func TestRedoLogBasic(t *testing.T) {
 	}
 	redoTx.End()
 	transaction.Release(redoTx)
+
+	fmt.Println("Testing slice append commit.")
+	struct1.slice = pmake([]int, 100)
+	struct2.slice = pmake([]int, 101)
+	struct2.slice[100] = 300
+	redoTx = transaction.NewRedoTx()
+	redoTx.Begin()
+	redoTx.Log(&struct1.slice, append(struct1.slice, 200)) // Logs only slicehdr
+	tmpSlice := redoTx.ReadLog(&struct1.slice).([]int)     // slicehdr from log
+	assertEqual(t, len(tmpSlice), 101)
+	redoTx.Log(tmpSlice, struct2.slice)
+	redoTx.End()
+	assertEqual(t, struct1.slice[100], 300)
+	assertEqual(t, len(struct1.slice), 101)
+
+	fmt.Println("Testing slice append abort.")
+	struct2.slice = pmake([]int, 90)
+	redoTx.Begin()
+	redoTx.Log(&struct2.slice, append(struct2.slice, 10))
+	tmpSlice = redoTx.ReadLog(&struct2.slice).([]int)
+	assertEqual(t, len(tmpSlice), 91)
+	redoTx.Log(&tmpSlice[20], 20)
+	transaction.Release(redoTx)
+	assertEqual(t, len(struct2.slice), 90)
+	assertEqual(t, struct2.slice[20], 0)
+	redoTx = transaction.NewRedoTx()
+	struct2.slice = pmake([]int, 100)
+	struct2.slice = append(struct2.slice, 1)
+	redoTx.Begin()
+	redoTx.Log(&struct2.slice, append(struct2.slice, 1)) // slicehdr not updated
+	redoTx.Log(&struct2.slice[30], 30)
+	transaction.Release(redoTx)
+	assertEqual(t, len(struct2.slice), 101)
+	assertEqual(t, struct2.slice[30], 0)
+
+	fmt.Println("Testing error for logging data in volatile memory")
+	errVolData := errors.New("[redoTx] Log: Updates to data in volatile" +
+		" memory can be lost")
+	x := new(int)
+	redoTx = transaction.NewRedoTx()
+	redoTx.Begin()
+	err := redoTx.Log(x, 1)
+	assertEqual(t, err.Error(), errVolData.Error())
+	assertEqual(t, redoTx.ReadLog(x).(int), 1) // got error, but data logged
+	redoTx.End()
+	assertEqual(t, *x, 1) // got error, but update still persisted
+	transaction.Release(redoTx)
+	redoTx = transaction.NewRedoTx()
+	redoTx.Begin()
+	y := make([]int, 10)
+	z := make([]int, 5)
+	z[0] = 10
+	err = redoTx.Log(y, z)
+	assertEqual(t, err.Error(), errVolData.Error())
+	assertEqual(t, redoTx.ReadLog(&y[0]).(int), 10)
+	redoTx.End()
+	assertEqual(t, y[0], 10)
+	transaction.Release(redoTx)
+	assertEqual(t, y[0], 10)
 }
 
 func TestRedoLogIsolation(t *testing.T) {
