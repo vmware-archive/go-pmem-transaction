@@ -40,6 +40,7 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/debug"
+	"sync"
 	"unsafe"
 )
 
@@ -55,6 +56,8 @@ type (
 		large     bool
 		committed bool
 		m         map[unsafe.Pointer]int
+		rlocks    []*sync.RWMutex
+		wlocks    []*sync.RWMutex
 	}
 
 	redoTxHeader struct {
@@ -103,8 +106,10 @@ func initRedoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 			} else {
 				tx = headerPtr.lLogPtr[i-SLOGNUM]
 			}
+			tx.wlocks = make([]*sync.RWMutex, 0, 0) // Resetting volatile locks
+			tx.rlocks = make([]*sync.RWMutex, 0, 0) // before checking for data
 			if tx.committed {
-				tx.commit()
+				tx.commit(true)
 			} else {
 				tx.abort()
 			}
@@ -129,6 +134,8 @@ func _initRedoTx(size int) *redoTx {
 	tx.log = pmake([]entry, size)
 	runtime.PersistRange(unsafe.Pointer(tx), unsafe.Sizeof(*tx))
 	tx.m = make(map[unsafe.Pointer]int) // On abort m isn't used, so not in pmem
+	tx.wlocks = make([]*sync.RWMutex, 0, 0)
+	tx.rlocks = make([]*sync.RWMutex, 0, 0)
 	return tx
 }
 
@@ -157,15 +164,15 @@ func releaseRedoTx(t *redoTx) {
 	}
 }
 
-func (t *redoTx) ReadLog(ptr interface{}) (retVal interface{}, err error) {
+func (t *redoTx) ReadLog(ptr interface{}) (retVal interface{}) {
 	ptrV := reflect.ValueOf(ptr)
-	oldVal := reflect.Indirect(ptrV)
-	typ := oldVal.Type()
-	var logData reflect.Value
 	switch kind := ptrV.Kind(); kind {
 	case reflect.Ptr:
+		oldVal := reflect.Indirect(ptrV)
+		var logData reflect.Value
 		if oldVal.Kind() == reflect.Struct {
 			// construct struct by reading each field from log
+			typ := oldVal.Type()
 			retStructPtr := reflect.New(typ)
 			retStruct := retStructPtr.Elem()
 			for i := 0; i < oldVal.NumField(); i++ {
@@ -173,48 +180,65 @@ func (t *redoTx) ReadLog(ptr interface{}) (retVal interface{}, err error) {
 				structFieldTyp := typ.Field(i).Type
 				if structFieldTyp.Kind() == reflect.Struct {
 					// Handle nested struct
-					v1, err1 := t.ReadLog(structFieldPtr.Interface())
-					if err1 != nil {
-						return retVal, err1
-					}
+					v1 := t.ReadLog(structFieldPtr.Interface())
 					logData = reflect.ValueOf(v1)
 				} else {
-					logData, err = t.readLogEntry(structFieldPtr.Pointer(),
+					logData = t.readLogEntry(structFieldPtr.Pointer(),
 						structFieldTyp)
-					if err != nil {
-						return retVal, err
-					}
 				}
-				retStruct.Field(i).Set(logData) // populate struct field
+				if retStruct.Field(i).CanSet() {
+					retStruct.Field(i).Set(logData) // populate struct field
+				} else {
+					log.Fatal("[redoTx] ReadLog: Cannot read struct with " +
+						"unexported field")
+				}
 			}
 			retVal = retStruct.Interface()
+		} else if oldVal.Kind() == reflect.Invalid {
+			// Do nothing.
 		} else {
-			logData, err = t.readLogEntry(ptrV.Pointer(), typ)
-			if err != nil {
-				return retVal, err
-			}
+			typ := oldVal.Type()
+			logData = t.readLogEntry(ptrV.Pointer(), typ)
 			retVal = logData.Interface()
 		}
 	default: // TODO: Check if need to read & return slice
-		return retVal, errors.New("[redoTx] ReadLog: Arg must be pointer/slice")
+		log.Fatal("[redoTx] ReadLog: Arg must be pointer/slice")
 	}
-	return retVal, err
+	return retVal
 }
 
-func (t *redoTx) readLogEntry(ptr uintptr, typ reflect.Type) (v reflect.Value,
-	err error) {
+func (t *redoTx) readLogEntry(ptr uintptr, typ reflect.Type) (v reflect.Value) {
 	tail, ok := t.m[unsafe.Pointer(ptr)]
 	if !ok {
-		return v, errors.New("[redoTx] ReadLog: data not logged before")
+		dataPtr := reflect.NewAt(typ, unsafe.Pointer(ptr))
+		v = reflect.Indirect(dataPtr)
+		// TODO: Data was not stored in redo log before. Should we log now?
+		return v
 	}
 	logDataPtr := reflect.NewAt(typ, t.log[tail].data)
 	v = reflect.Indirect(logDataPtr)
-	return v, nil
+	return v
+}
+
+func checkDataTypes(newV reflect.Value, v1 reflect.Value) (err error) {
+	if newV.Kind() != reflect.Invalid {
+		// Invalid => Logging <nil> value. No type check
+		oldV := reflect.Indirect(v1)
+		if oldV.Kind() != reflect.Interface {
+			// Can't do type comparison if logging interface
+			oldType := v1.Type().Elem()
+			if newV.Type() != oldType {
+				err = errors.New("Log Error. Data passed to Log() is not of " +
+					"the same type as underlying data of ptr")
+			}
+		}
+	}
+	return err
 }
 
 // Caveat: With the current implementation, Redo Log doesn't support logging
-// structs with unexported variables. Individual fields of struct can be logged.
-// This can be solved with some extra overhead. Left as future work for now.
+// structs with unexported slice, struct, interface members. Individual fields
+// of struct can be logged.
 func (t *redoTx) Log(intf ...interface{}) (err error) {
 	if len(intf) != 2 {
 		return errors.New("[redoTx] Log: Incorrectly called. Correct usage: " +
@@ -230,52 +254,100 @@ func (t *redoTx) Log(intf ...interface{}) (err error) {
 		}
 
 		// Each slice element is stored separately in log
-		for i := 0; i < v1.Len(); i++ {
+		var vLen int
+		if v1.Len() < v2.Len() {
+			vLen = v1.Len()
+		} else {
+			vLen = v2.Len()
+		}
+		for i := 0; i < vLen; i++ {
 			elemNewVal := v2.Index(i)
 			elemPtr := v1.Index(i).Addr()
-			t.writeLogEntry(elemPtr.Pointer(), elemNewVal)
+			t.writeLogEntry(elemPtr.Pointer(), elemNewVal, elemNewVal.Type())
 		}
 	case reflect.Ptr:
-		oldV := reflect.Indirect(v1) // the underlying data of v1
-		if v2.Type() != oldV.Type() {
-			return errors.New("Log Error. Data passed to Log() is not of " +
-				"the same type as underlying data of ptr")
+		oldType := v1.Type().Elem() // type of data, v1 is pointing to
+		err = checkDataTypes(v2, v1)
+		if err != nil {
+			return err
 		}
 		if v2.Kind() == reflect.Struct {
 			// Each struct field is stored separately in log
+			oldV := reflect.Indirect(v1)
 			for i := 0; i < v2.NumField(); i++ {
 				newVal := v2.Field(i)
 				oldVal := oldV.Field(i)
+				oldType = oldVal.Type()
 				ptrOrig := oldVal.Addr()
 				if newVal.Kind() == reflect.Struct {
+					if !newVal.CanInterface() {
+						log.Fatal("[redoTx] Log: Cannot log unexported struct" +
+							"member variable")
+					}
 					err = t.Log(ptrOrig.Interface(), newVal.Interface())
 				} else if newVal.Kind() == reflect.Slice {
+					if !newVal.CanInterface() {
+						log.Fatal("[redoTx] Log: Cannot log unexported slice" +
+							"member variable")
+					}
 					err = t.Log(oldVal.Interface(), newVal.Interface())
 				} else {
-					err = t.writeLogEntry(ptrOrig.Pointer(), newVal)
+					err = t.writeLogEntry(ptrOrig.Pointer(), newVal, oldType)
 				}
 				if err != nil {
 					return err
 				}
 			}
 		} else {
-			err = t.writeLogEntry(v1.Pointer(), v2)
+			err = t.writeLogEntry(v1.Pointer(), v2, oldType)
 		}
 	default:
 		debug.PrintStack()
-		return errors.New("[redoTx] Log: data must be pointer/slice")
+		return errors.New("[redoTx] Log: first arg must be pointer/slice")
+	}
+	if !runtime.InPmem(v1.Pointer()) {
+		err = errors.New("[redoTx] Log: Updates to data in volatile memory" +
+			" can be lost")
 	}
 	return err
 }
 
-func (t *redoTx) writeLogEntry(ptr uintptr, data reflect.Value) error {
-	if data.CanInterface() == false {
-		return errors.New("[redoTx] Log: can't log unexported variables")
-	}
-	typ := data.Type()
+func (t *redoTx) writeLogEntry(ptr uintptr, data reflect.Value,
+	typ reflect.Type) error {
 	size := int(typ.Size())
-	logDataPtr := reflect.PNew(typ)
-	reflect.Indirect(logDataPtr).Set(data)
+	var logDataPtr reflect.Value
+	logDataPtr = reflect.PNew(typ)
+	if data.Kind() == reflect.Invalid {
+		// Do nothing, data has <nil> value
+	} else if data.CanInterface() {
+		reflect.Indirect(logDataPtr).Set(data)
+	} else { // To log unexported fields of struct
+		switch data.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32,
+			reflect.Int64:
+			reflect.Indirect(logDataPtr).SetInt(data.Int())
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32,
+			reflect.Uint64, reflect.Uintptr:
+			reflect.Indirect(logDataPtr).SetUint(data.Uint())
+		case reflect.Float32, reflect.Float64:
+			reflect.Indirect(logDataPtr).SetFloat(data.Float())
+		case reflect.Bool:
+			reflect.Indirect(logDataPtr).SetBool(data.Bool())
+		case reflect.Complex64, reflect.Complex128:
+			reflect.Indirect(logDataPtr).SetComplex(data.Complex())
+		case reflect.String:
+			reflect.Indirect(logDataPtr).SetString(data.String())
+		case reflect.Ptr, reflect.UnsafePointer:
+			// Go only allows setting a pointer as unsafe.Pointer, so logDataPtr
+			// has to be reallocated with new type as unsafe.Pointer
+			ptrData := unsafe.Pointer(data.Pointer())
+			logDataPtr = reflect.PNew(reflect.TypeOf(ptrData))
+			reflect.Indirect(logDataPtr).SetPointer(ptrData)
+		default:
+			log.Fatalf("[redoTx] Log: Cannot log unexported data of kind: ",
+				data.Kind(), "type: ", typ)
+		}
+	}
 
 	// Check if write to this addr already stored in log by checking in map.
 	// If yes, update value in-place in log. Else add new entry to log.
@@ -299,6 +371,11 @@ func (t *redoTx) writeLogEntry(ptr uintptr, data reflect.Value) error {
 	t.log[tail].ptr = unsafe.Pointer(ptr)
 	t.log[tail].data = unsafe.Pointer(logDataPtr.Pointer())
 	t.log[tail].size = size
+	if data.Kind() == reflect.Slice {
+		// ptr to sliceHeader was passed for logging, so need to persist
+		// new slice too on tx complete. This will be used in t.commit()
+		t.log[tail].sliceElemSize = int(data.Type().Elem().Size())
+	}
 	return nil
 }
 
@@ -383,21 +460,57 @@ func (t *redoTx) End() error {
 			uintptr(t.tail*(int)(unsafe.Sizeof(t.log[0]))))
 		t.committed = true
 		runtime.PersistRange(unsafe.Pointer(t), unsafe.Sizeof(*t))
-		t.commit()
+		t.commit(false)
 	}
 	return nil
 }
 
+func (t *redoTx) RLock(m *sync.RWMutex) {
+	m.RLock()
+	t.rlocks = append(t.rlocks, m)
+}
+
+func (t *redoTx) WLock(m *sync.RWMutex) {
+	m.Lock()
+	t.wlocks = append(t.wlocks, m)
+}
+
+func (t *redoTx) Lock(m *sync.RWMutex) {
+	t.WLock(m)
+}
+
+func (t *redoTx) unLock() {
+	for _, m := range t.wlocks {
+		m.Unlock()
+	}
+	t.wlocks = make([]*sync.RWMutex, 0, 0)
+	for _, m := range t.rlocks {
+		m.RUnlock()
+	}
+	t.rlocks = make([]*sync.RWMutex, 0, 0)
+}
+
 // Performs in-place updates of app data structures. Started again, if crashed
 // in between
-func (t *redoTx) commit() error {
+func (t *redoTx) commit(skipVolData bool) error {
 	for i := t.tail - 1; i >= 0; i-- {
 		oldDataPtr := (*[LBUFFERSIZE]byte)(t.log[i].ptr)
+		if skipVolData && !runtime.InPmem(uintptr(unsafe.Pointer(oldDataPtr))) {
+			// If commit() was called during Init, control reaches here. If so,
+			// we drop updates to data in volatile memory
+			continue
+		}
 		logDataPtr := (*[LBUFFERSIZE]byte)(t.log[i].data)
 		oldData := oldDataPtr[:t.log[i].size:t.log[i].size]
 		logData := logDataPtr[:t.log[i].size:t.log[i].size]
 		copy(oldData, logData)
 		runtime.PersistRange(t.log[i].ptr, uintptr(t.log[i].size))
+		if t.log[i].sliceElemSize != 0 {
+			// ptr points to sliceHeader. So, need to persist the slice too
+			shdr := (*sliceHeader)(t.log[i].ptr)
+			runtime.PersistRange(shdr.data, uintptr(shdr.len*
+				t.log[i].sliceElemSize))
+		}
 	}
 	t.committed = false
 	runtime.PersistRange(unsafe.Pointer(&t.committed),
@@ -418,12 +531,14 @@ func (t *redoTx) abort() error {
 
 // Resets the entries from sz-1 to 0 in the log
 func (t *redoTx) reset(sz int) {
+	defer t.unLock()
 	t.level = 0
 	t.m = make(map[unsafe.Pointer]int)
 	for i := sz - 1; i >= 0; i-- {
 		t.log[i].ptr = nil
 		t.log[i].data = nil
 		t.log[i].size = 0
+		t.log[i].sliceElemSize = 0
 	}
 	t.tail = 0
 }
