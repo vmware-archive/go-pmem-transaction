@@ -1,6 +1,7 @@
 package pmemTests
 
 import (
+	"errors"
 	"fmt"
 	"go-pmem-transaction/pmem"
 	"go-pmem-transaction/transaction"
@@ -90,9 +91,9 @@ func TestAPIs(t *testing.T) {
 	if err := pmem.Delete("region4"); err != nil {
 		assert(t)
 	}
-	if err1 := pmem.Delete("region4"); err1 == nil { // This should return error
-		assert(t)
-	}
+	err1 := pmem.Delete("region4") // This should return error
+	assertEqual(t, err1.Error(), errors.New("No such object allocated before").
+		Error())
 	c = (*int)(pmem.New("region4", c))
 	assertEqual(t, *c, 0) // above New() call would have allocated a new int
 	pmem.Delete("region4")
@@ -110,13 +111,18 @@ func TestAPIs(t *testing.T) {
 	assertEqual(t, len(st2.slice), len(st3.slice))
 	assertEqual(t, st2.slice[0], st3.slice[0])
 	assertEqual(t, st2.slice[99], st3.slice[99])
-	if pmem.Get("region4", st3) == nil {
+	var d *int
+	if pmem.Get("region4", st3) != nil {
+		if err := pmem.Delete("region4"); err != nil {
+			assert(t)
+		}
+
+		d = (*int)(pmem.New("region4", d))
+		*d = 1
+		assertEqual(t, *d, 1)
+	} else {
 		assert(t)
 	}
-	var d *int
-	d = (*int)(pmem.New("region4", d))
-	assertEqual(t, *d, 0)
-	*d = 1
 	if pmem.Get("region4", d) == nil {
 		assert(t)
 	}
@@ -225,6 +231,36 @@ func TestAPICrash3(t *testing.T) {
 		return
 	}
 	t.Fatalf("process ran with err %v, want exit status 1", err)
+}
+
+func TestAPICrash4(t *testing.T) {
+	fmt.Println("Testing API crash for New() call with already existing " +
+		"object name")
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("New() panicked successfully with msg:", r)
+			pmem.Delete("region8")
+		}
+	}()
+	var a *int
+	a = (*int)(pmem.New("region8", a))
+	var b *int
+	b = (*int)(pmem.New("region8", b))
+}
+
+func TestAPICrash5(t *testing.T) {
+	fmt.Println("Testing API crash for Make() call with already existing " +
+		"object name")
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("Make() panicked successfully with msg:", r)
+			pmem.Delete("region9")
+		}
+	}()
+	var s1 []int
+	s1 = pmem.Make("region9", s1, 10).([]int)
+	var s2 []int
+	s2 = pmem.Make("region9", s2, 10).([]int)
 }
 
 func assert(t *testing.T) {

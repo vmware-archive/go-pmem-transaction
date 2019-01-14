@@ -2,6 +2,7 @@ package pmem
 
 import (
 	"errors"
+	"fmt"
 	"go-pmem-transaction/transaction"
 	"log"
 	"reflect"
@@ -78,7 +79,7 @@ type sliceHeader struct {
 
 // Make returns the interface to the slice asked for, slice being created in
 // persistent heap. Only supports slices for now. If an object with same name
-// already exists, it is updated to point to the new object.
+// already exists, it panics.
 // Syntax:   var s []int
 //           s = pmem.Make("myName", s, 10).([]int)
 func Make(name string, intf ...interface{}) interface{} {
@@ -89,6 +90,10 @@ func Make(name string, intf ...interface{}) interface{} {
 	found, i := exists(name)
 	sTyp := v1.Type()
 	sTypString := sTyp.PkgPath() + sTyp.String()
+	if found {
+		obj := rootPtr.appData[i]
+		panic(fmt.Sprintf("Object %s already exists", obj.name))
+	}
 	v2 := reflect.ValueOf(intf[1])
 	sLen := int(v2.Int())
 	newV := reflect.PMakeSlice(sTyp, sLen, sLen)
@@ -100,15 +105,8 @@ func Make(name string, intf ...interface{}) interface{} {
 	tx := transaction.NewUndoTx()
 	m.Lock()
 	tx.Begin()
-	if found {
-		tx.Log(&rootPtr.appData[i])
-		rootPtr.appData[i] = newNamedObj
-	} else {
-		tx.Log(&rootPtr.appData)
-		rootPtr.appData = append(rootPtr.appData, newNamedObj)
-		runtime.PersistRange(unsafe.Pointer(&rootPtr.appData[0]),
-			uintptr(len(rootPtr.appData))*unsafe.Sizeof(newNamedObj))
-	}
+	tx.Log(&rootPtr.appData)
+	rootPtr.appData = append(rootPtr.appData, newNamedObj)
 	tx.End()
 	m.Unlock()
 	transaction.Release(tx)
@@ -118,9 +116,8 @@ func Make(name string, intf ...interface{}) interface{} {
 }
 
 // New is used to create named objects in persistent heap. This object would
-// survive crashes. Returns unsafe.Pointer to the object
-// If an object with same name already exists, it is updated to point to the new
-// object.
+// survive crashes. Returns unsafe.Pointer to the object if the creation was
+// successful. If an object with same name already exists, it panics.
 // Syntax: var a *int
 //         a = (*int)(pmem.New("myName", a))
 func New(name string, intf interface{}) unsafe.Pointer {
@@ -131,20 +128,18 @@ func New(name string, intf interface{}) unsafe.Pointer {
 	t := v.Type()
 	ts := t.PkgPath() + t.String()
 	found, i := exists(name)
+	if found {
+		obj := rootPtr.appData[i]
+		panic(fmt.Sprintf("Object %s already exists", obj.name))
+	}
 	newObj := reflect.PNew(t.Elem()) //Elem() returns type of object t points to
 	newNamedObj := namedObject{name, ts, unsafe.Pointer(newObj.Pointer())}
 	tx := transaction.NewUndoTx()
 	m.Lock()
 	tx.Begin()
-	if found { // object with name already exists, update to point to new type
-		tx.Log(&rootPtr.appData[i])
-		rootPtr.appData[i] = newNamedObj
-	} else { // add to root pointer
-		tx.Log(&rootPtr.appData)
-		rootPtr.appData = append(rootPtr.appData, newNamedObj)
-		runtime.PersistRange(unsafe.Pointer(&rootPtr.appData[0]),
-			uintptr(len(rootPtr.appData))*unsafe.Sizeof(newNamedObj))
-	}
+	// add to root pointer
+	tx.Log(&rootPtr.appData)
+	rootPtr.appData = append(rootPtr.appData, newNamedObj)
 	tx.End()
 	m.Unlock()
 	transaction.Release(tx)
@@ -163,8 +158,6 @@ func Delete(name string) error {
 	tx.Begin()
 	tx.Log(&rootPtr.appData)
 	rootPtr.appData = append(rootPtr.appData[:i], rootPtr.appData[i+1:]...)
-	runtime.PersistRange(unsafe.Pointer(&rootPtr.appData[0]),
-		uintptr(len(rootPtr.appData))*unsafe.Sizeof(rootPtr.appData[0]))
 	tx.End()
 	m.Unlock()
 	transaction.Release(tx)
@@ -188,14 +181,14 @@ func Get(name string, intf interface{}) unsafe.Pointer {
 	if obj.typ != ts {
 		log.Fatal("Object ", obj.name, "was created before with type ", obj.typ)
 	}
-	return rootPtr.appData[i].ptr
+	return obj.ptr
 }
 
 // GetSlice is Get() for named slices. Syntax same as Make()
 func GetSlice(name string, intf ...interface{}) interface{} {
 	v1 := reflect.ValueOf(intf[0])
 	if v1.Kind() != reflect.Slice {
-		log.Fatal("Can only pmem.Make slice")
+		log.Fatal("Can only GetSlice to retrieve named slices")
 	}
 	found, i := exists(name)
 	if !found {
