@@ -1,0 +1,4 @@
+# The initial code for the implementation of transaction package and undo
+# transactions was taken from the implementation of undo transactions by
+# Yi Yao (yyi@vmware.com) for Go-redis (https://gitlab.eng.vmware.com/afg/pmem)
+# during his time with the Application Focus Group (AFG) at VMware.

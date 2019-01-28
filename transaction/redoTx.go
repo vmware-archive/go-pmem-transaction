@@ -10,7 +10,7 @@
  *     tx.Begin()
  *     tx.Log(S.P, 100)
  *     a := tx.ReadLog(S.P) // At this point, a = 100, but S.P = 0
- *     tx.End() // S.P = 0 after this
+ *     tx.End() // S.P = 100 after this
  *     transaction.Release(tx)
  *
  *
