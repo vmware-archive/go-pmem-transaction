@@ -1,3 +1,8 @@
+///////////////////////////////////////////////////////////////////////
+// Copyright 2018-2019 VMware, Inc.
+// SPDX-License-Identifier: BSD-3-Clause
+///////////////////////////////////////////////////////////////////////
+
 /* Put address of the data to be updated and the new data entry in persistent
  * heap (with type info). All changes are copied to in-place data structures
  * at end of transaction. Value-based logging is done, so in-place updates

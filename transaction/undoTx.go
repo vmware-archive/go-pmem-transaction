@@ -1,3 +1,8 @@
+///////////////////////////////////////////////////////////////////////
+// Copyright 2018-2019 VMware, Inc.
+// SPDX-License-Identifier: BSD-3-Clause
+///////////////////////////////////////////////////////////////////////
+
 /* put log entries and data copies into persistent heap (with type info)
  * to prevent runtime garbage collection to reclaim dangling pointers caused by
  * undo updates.
