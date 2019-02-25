@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 ///////////////////////////////////////////////////////////////////////
 
-package txTests
+package txtest
 
 import (
 	"fmt"

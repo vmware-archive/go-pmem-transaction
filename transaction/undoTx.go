@@ -417,9 +417,6 @@ func (t *undoTx) abort() error {
 		logDataPtr := (*[LBUFFERSIZE]byte)(t.log[i].data)
 		original := origDataPtr[:t.log[i].size:t.log[i].size]
 		logdata := logDataPtr[:t.log[i].size:t.log[i].size]
-
-		// TODO: Remove this. Fail here to test nested crashing
-		// time.Sleep(2 * time.Second)
 		copy(original, logdata)
 		runtime.PersistRange(t.log[i].ptr, uintptr(t.log[i].size))
 	}

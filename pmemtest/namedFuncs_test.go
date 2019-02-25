@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 ///////////////////////////////////////////////////////////////////////
 
-package pmemTests
+package pmemtest
 
 import (
 	"errors"

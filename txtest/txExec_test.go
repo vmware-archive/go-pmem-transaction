@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 ///////////////////////////////////////////////////////////////////////
 
-package txTests
+package txtest
 
 import (
 	"errors"
@@ -47,11 +47,11 @@ func TestExec(t *testing.T) {
 	errNoArgs := errors.New("[undoTx] Exec: Must have atleast one argument")
 	errFirstArg := errors.New("[undoTx] Exec: 1st argument must be a function")
 	errNumArgs := errors.New("[undoTx] Exec: Incorrect no. of args to " +
-		"function go-pmem-transaction/tests.add")
+		"function go-pmem-transaction/txtest.add")
 	errTypeArgs := errors.New("[undoTx] Exec: Incorrect type of args to " +
-		"function go-pmem-transaction/tests.add")
+		"function go-pmem-transaction/txtest.add")
 	errTxBeginEnd := errors.New("[undoTx] Exec: Unbalanced Begin() & End() " +
-		"calls inside function go-pmem-transaction/tests.TestExec.")
+		"calls inside function go-pmem-transaction/txtest.TestExec.")
 	errNil := err
 
 	fmt.Println("Testing with no arguments")
