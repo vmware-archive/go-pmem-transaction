@@ -6,7 +6,7 @@
 package txtest
 
 import (
-	"go-pmem-transaction/pmem"
+	"github.com/vmware/go-pmem-transaction/pmem"
 	"os"
 )
 

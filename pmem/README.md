@@ -1,9 +1,9 @@
 This document explains the functions and concepts of `pmem` package which 
 provides a way for Go applications to access persistent memory. It 
 has been written to work in conjunction with the Go trasaction 
-[package](https://gitlab.eng.vmware.com/afg/go-pmem-transaction/tree/master/transaction)
+[package](https://github.com/vmware/go-pmem-transaction/tree/master/transaction)
 and changes made to Go compiler to support persistent memory in a separate 
-[project](https://gitlab.eng.vmware.com/afg/go-pmem). 
+[project](https://github.com/jerrinsg/go-pmem).
 
 Any data in volatile memory is lost on restart, so volatile pointers pointing to
 data in non-volatile memory (V-to-NV pointers) will be lost too. This leaves 
@@ -21,7 +21,7 @@ detecting if the application crashed in the past, and if there are any
 incomplete updates stored in the transaction logs. Based on whether these 
 updates were committed or not, the updates are applied/dropped respectively. 
 This function internally calls `transaction.Init()` of transaction 
-[package](https://gitlab.eng.vmware.com/afg/go-pmem-transaction/tree/master/transaction)
+[package](https://github.com/vmware/go-pmem-transaction/tree/master/transaction)
 Example:
 ```go
 if pmem.Init("myTestFile") {

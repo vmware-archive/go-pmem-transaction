@@ -303,12 +303,11 @@ func (t *undoTx) Exec(intf ...interface{}) (retVal []reflect.Value, err error) {
 			errors.New("[undoTx] Exec: 1st argument must be a function")
 	}
 	fnType := fn.Type()
-	fnName := runtime.FuncForPC(fn.Pointer()).Name()
 	// Populate the arguments of the function correctly
 	argv := make([]reflect.Value, fnType.NumIn())
 	if len(argv) != len(intf) {
-		return retVal, errors.New("[undoTx] Exec: Incorrect no. of args to " +
-			"function " + fnName)
+		return retVal, errors.New("[undoTx] Exec: Incorrect no. of args in " +
+			"function passed to Exec")
 	}
 	for i := range argv {
 		if i == fnPosInInterfaceArgs {
@@ -320,7 +319,7 @@ func (t *undoTx) Exec(intf ...interface{}) (retVal []reflect.Value, err error) {
 			// and populate in argv
 			if reflect.TypeOf(intf[i]) != fnType.In(i) {
 				return retVal, errors.New("[undoTx] Exec: Incorrect type of " +
-					"args to function " + fnName)
+					"args in function passed to Exec")
 			}
 			argv[i] = reflect.ValueOf(intf[i])
 		}
@@ -337,7 +336,7 @@ func (t *undoTx) Exec(intf ...interface{}) (retVal []reflect.Value, err error) {
 	retVal = fn.Call(argv)
 	if txLevel != t.level {
 		return retVal, errors.New("[undoTx] Exec: Unbalanced Begin() & End() " +
-			"calls inside function " + fnName)
+			"calls inside function passed to Exec")
 	}
 	return retVal, err
 }

@@ -4,7 +4,7 @@ The package implements undo logging and redo logging. So, we currently support
 undo and redo transactions. Any other kind of transaction can be implemented 
 given it satisfies the `TX` interface. The package has been implemented to be 
 used in conjunction with the persistent memory (pmem) changes being made to Go 
-runtime in a separate [project](https://gitlab.eng.vmware.com/afg/go-pmem).
+runtime in a separate [project](https://github.com/jerrinsg/go-pmem).
 
 The transaction package is initialized through function
 `Init(logHeadPtr unsafe.Pointer, logType string)` . If the first argument is
@@ -14,7 +14,7 @@ state of stored application data. The 2nd argument specifies whether the user
 wants a "undo" log or "redo" log. 
 Example usage: `transaction.Init(nil, "undo")`
 This function is internally called by `Init()` function of `pmem` 
-[package](https://gitlab.eng.vmware.com/afg/go-pmem-transaction/tree/master/pmem)
+[package](https://github.com/vmware/go-pmem-transaction/tree/master/pmem)
 and need not be called by applications explicitly.
 
 The transaction variables can be initialized using package functions

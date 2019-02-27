@@ -8,7 +8,7 @@ package txtest
 import (
 	"errors"
 	"fmt"
-	"go-pmem-transaction/transaction"
+	"github.com/vmware/go-pmem-transaction/transaction"
 	"reflect"
 	"runtime/debug"
 	"testing"
@@ -46,12 +46,12 @@ func TestExec(t *testing.T) {
 	// Enumerating possible errors Exec() can return
 	errNoArgs := errors.New("[undoTx] Exec: Must have atleast one argument")
 	errFirstArg := errors.New("[undoTx] Exec: 1st argument must be a function")
-	errNumArgs := errors.New("[undoTx] Exec: Incorrect no. of args to " +
-		"function go-pmem-transaction/txtest.add")
-	errTypeArgs := errors.New("[undoTx] Exec: Incorrect type of args to " +
-		"function go-pmem-transaction/txtest.add")
+	errNumArgs := errors.New("[undoTx] Exec: Incorrect no. of args in " +
+		"function passed to Exec")
+	errTypeArgs := errors.New("[undoTx] Exec: Incorrect type of args in " +
+		"function passed to Exec")
 	errTxBeginEnd := errors.New("[undoTx] Exec: Unbalanced Begin() & End() " +
-		"calls inside function go-pmem-transaction/txtest.TestExec.")
+		"calls inside function passed to Exec")
 	errNil := err
 
 	fmt.Println("Testing with no arguments")
@@ -90,7 +90,7 @@ func TestExec(t *testing.T) {
 	})
 	transaction.Release(tx)
 	assertEqual(t, a.i, 2) // TX reverted as Release() is called without End()
-	assertEqual(t, err.Error(), errTxBeginEnd.Error()+"func1")
+	assertEqual(t, err.Error(), errTxBeginEnd.Error())
 
 	fmt.Println("Testing with Begin() & End() calls inside function " +
 		"passed to Exec")
@@ -118,7 +118,7 @@ func TestExec(t *testing.T) {
 	})
 	transaction.Release(tx)
 	assertEqual(t, a.i, 500) // TX completed successfully but returns error
-	assertEqual(t, err.Error(), errTxBeginEnd.Error()+"func3")
+	assertEqual(t, err.Error(), errTxBeginEnd.Error())
 
 	fmt.Println("Testing simple add function")
 	a.i = 2
@@ -161,7 +161,7 @@ func TestExec(t *testing.T) {
 		// Release aborts the transaction because tx.End() is not called yet
 		transaction.Release(tx)
 	})
-	assertEqual(t, err.Error(), errTxBeginEnd.Error()+"func5")
+	assertEqual(t, err.Error(), errTxBeginEnd.Error())
 	assertEqual(t, a.i, 200)
 	assertEqual(t, len(a.slice), 0) // Changes rolled back successfully.
 
@@ -178,7 +178,7 @@ func TestExec(t *testing.T) {
 		// Release aborts the transaction because tx.End() is not called yet
 		transaction.Release(tx)
 	})
-	assertEqual(t, err.Error(), errTxBeginEnd.Error()+"func6")
+	assertEqual(t, err.Error(), errTxBeginEnd.Error())
 	assertEqual(t, a.i, 5000)
 	assertEqual(t, len(a.slice), 0)
 

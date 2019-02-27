@@ -8,7 +8,7 @@ package txtest
 import (
 	"errors"
 	"fmt"
-	"go-pmem-transaction/transaction"
+	"github.com/vmware/go-pmem-transaction/transaction"
 	"os"
 	"os/exec"
 	"runtime"

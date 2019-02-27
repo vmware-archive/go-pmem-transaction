@@ -8,8 +8,8 @@ package pmemtest
 import (
 	"errors"
 	"fmt"
-	"go-pmem-transaction/pmem"
-	"go-pmem-transaction/transaction"
+	"github.com/vmware/go-pmem-transaction/pmem"
+	"github.com/vmware/go-pmem-transaction/transaction"
 	"os"
 	"os/exec"
 	"runtime/debug"

@@ -7,7 +7,7 @@ package txtest
 
 import (
 	"fmt"
-	"go-pmem-transaction/transaction"
+	"github.com/vmware/go-pmem-transaction/transaction"
 	"sync"
 	"testing"
 	"time"
