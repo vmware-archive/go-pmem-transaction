@@ -18,8 +18,8 @@ import (
 
 type (
 	namedObject struct {
-		name string
-		typ  string
+		name []byte
+		typ  []byte
 		ptr  unsafe.Pointer
 	}
 	pmemHeader struct {
@@ -97,7 +97,7 @@ func Make(name string, intf ...interface{}) interface{} {
 	sTypString := sTyp.PkgPath() + sTyp.String()
 	if found {
 		obj := rootPtr.appData[i]
-		panic(fmt.Sprintf("Object %s already exists", obj.name))
+		panic(fmt.Sprintf("Object %s already exists", string(obj.name[:])))
 	}
 	v2 := reflect.ValueOf(intf[1])
 	sLen := int(v2.Int())
@@ -106,11 +106,17 @@ func Make(name string, intf ...interface{}) interface{} {
 	sliceHdr := pnew(sliceHeader)
 	*sliceHdr = *(*sliceHeader)(vPtr.ptr)
 	runtime.PersistRange(unsafe.Pointer(sliceHdr), unsafe.Sizeof(*sliceHdr))
-	newNamedObj := namedObject{name, sTypString, unsafe.Pointer(sliceHdr)}
+	nameByte := pmake([]byte, len(name))
+	sTypByte := pmake([]byte, len(sTypString))
+	copy(nameByte, name)
+	copy(sTypByte, sTypString)
+	runtime.PersistRange(unsafe.Pointer(&nameByte[0]), uintptr(len(nameByte)))
+	runtime.PersistRange(unsafe.Pointer(&sTypByte[0]), uintptr(len(sTypByte)))
+	newNamedObj := namedObject{nameByte, sTypByte, unsafe.Pointer(sliceHdr)}
 	tx := transaction.NewUndoTx()
 	m.Lock()
 	tx.Begin()
-	tx.Log(&rootPtr.appData)
+	tx.Log(&rootPtr.appData) // add to root pointer
 	rootPtr.appData = append(rootPtr.appData, newNamedObj)
 	tx.End()
 	m.Unlock()
@@ -135,15 +141,20 @@ func New(name string, intf interface{}) unsafe.Pointer {
 	found, i := exists(name)
 	if found {
 		obj := rootPtr.appData[i]
-		panic(fmt.Sprintf("Object %s already exists", obj.name))
+		panic(fmt.Sprintf("Object %s already exists", string(obj.name[:])))
 	}
+	nameByte := pmake([]byte, len(name))
+	tByte := pmake([]byte, len(ts))
 	newObj := reflect.PNew(t.Elem()) //Elem() returns type of object t points to
-	newNamedObj := namedObject{name, ts, unsafe.Pointer(newObj.Pointer())}
+	copy(nameByte, name)
+	copy(tByte, ts)
+	runtime.PersistRange(unsafe.Pointer(&nameByte[0]), uintptr(len(nameByte)))
+	runtime.PersistRange(unsafe.Pointer(&tByte[0]), uintptr(len(tByte)))
+	newNamedObj := namedObject{nameByte, tByte, unsafe.Pointer(newObj.Pointer())}
 	tx := transaction.NewUndoTx()
 	m.Lock()
 	tx.Begin()
-	// add to root pointer
-	tx.Log(&rootPtr.appData)
+	tx.Log(&rootPtr.appData) // add to root pointer
 	rootPtr.appData = append(rootPtr.appData, newNamedObj)
 	tx.End()
 	m.Unlock()
@@ -183,8 +194,9 @@ func Get(name string, intf interface{}) unsafe.Pointer {
 	t := v.Type()
 	ts := t.PkgPath() + t.String()
 	obj := rootPtr.appData[i]
-	if obj.typ != ts {
-		log.Fatal("Object ", obj.name, "was created before with type ", obj.typ)
+	if string(obj.typ[:]) != ts {
+		log.Fatal("Object ", string(obj.name[:]), "was created before with ",
+			"type ", string(obj.typ[:]))
 	}
 	return obj.ptr
 }
@@ -202,8 +214,9 @@ func GetSlice(name string, intf ...interface{}) interface{} {
 	sTyp := v1.Type()
 	sTypString := sTyp.PkgPath() + sTyp.String()
 	obj := rootPtr.appData[i]
-	if obj.typ != sTypString {
-		log.Fatal("Object ", obj.name, " was made before with type ", obj.typ)
+	if string(obj.typ[:]) != sTypString {
+		log.Fatal("Object ", string(obj.name[:]), " was made before with type ",
+			string(obj.typ[:]))
 	}
 	slicePtrWithTyp := reflect.NewAt(sTyp, obj.ptr)
 	sliceVal := reflect.Indirect(slicePtrWithTyp)
@@ -214,7 +227,7 @@ func exists(name string) (found bool, i int) {
 	var obj namedObject
 	m.RLock()
 	for i, obj = range rootPtr.appData {
-		if obj.name == name {
+		if string(obj.name[:]) == name {
 			found = true
 			break
 		}
