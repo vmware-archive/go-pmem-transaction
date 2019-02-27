@@ -24,8 +24,8 @@
  *   |          |       |
  *   V          V       V
  *  ---------------------------
- * | logPtr | logPtr |  ...    |      // Stored in pmem. Pointers to small &
- *  ---------------------------       // large logs
+ * | logPtr | logPtr |  ...    |      // Stored in pmem. Pointers to logs
+ *  ---------------------------
  *     |
  *     |      ---------------------
  *      ---> | entry | entry | ... |  // Has address of updates & new data copy
@@ -57,8 +57,10 @@ type (
 		tail int
 
 		// Level of nesting. Needed for nested transactions
-		level     int
-		large     bool
+		level int
+
+		// num of entries which can be stored in log
+		nEntry    int
 		committed bool
 		m         map[unsafe.Pointer]int
 		rlocks    []*sync.RWMutex
@@ -66,16 +68,14 @@ type (
 	}
 
 	redoTxHeader struct {
-		magic   int
-		sLogPtr [SLOGNUM]*redoTx // small txs
-		lLogPtr [LLOGNUM]*redoTx // large txs
+		magic  int
+		logPtr [LOGNUM]*redoTx
 	}
 )
 
 var (
 	headerPtr *redoTxHeader
-	redoPool  [2]chan *redoTx // volatile structure for pointing to logs.
-	// pool[0] for small txs, pool[1] for large txs
+	redoPool  chan *redoTx // volatile structure for pointing to logs.
 )
 
 /* Does the first time initialization, else restores log structure and
@@ -87,11 +87,8 @@ func initRedoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 		// First time initialization
 		headerPtr = pnew(redoTxHeader)
 		headerPtr.magic = MAGIC
-		for i := 0; i < SLOGNUM; i++ {
-			headerPtr.sLogPtr[i] = _initRedoTx(SENTRYSIZE)
-		}
-		for i := 0; i < LLOGNUM; i++ {
-			headerPtr.lLogPtr[i] = _initRedoTx(LENTRYSIZE)
+		for i := 0; i < LOGNUM; i++ {
+			headerPtr.logPtr[i] = _initRedoTx(NUMENTRIES)
 		}
 		runtime.PersistRange(unsafe.Pointer(headerPtr),
 			unsafe.Sizeof(*headerPtr))
@@ -105,12 +102,8 @@ func initRedoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 		// Depending on committed status of transactions, flush changes to
 		// data structures or delete all log entries.
 		var tx *redoTx
-		for i := 0; i < SLOGNUM+LLOGNUM; i++ {
-			if i < SLOGNUM {
-				tx = headerPtr.sLogPtr[i]
-			} else {
-				tx = headerPtr.lLogPtr[i-SLOGNUM]
-			}
+		for i := 0; i < LOGNUM; i++ {
+			tx = headerPtr.logPtr[i]
 			tx.wlocks = make([]*sync.RWMutex, 0, 0) // Resetting volatile locks
 			tx.rlocks = make([]*sync.RWMutex, 0, 0) // before checking for data
 			if tx.committed {
@@ -120,22 +113,16 @@ func initRedoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 			}
 		}
 	}
-	redoPool[0] = make(chan *redoTx, SLOGNUM)
-	redoPool[1] = make(chan *redoTx, LLOGNUM)
-	for i := 0; i < SLOGNUM; i++ {
-		redoPool[0] <- headerPtr.sLogPtr[i]
-	}
-	for i := 0; i < LLOGNUM; i++ {
-		redoPool[1] <- headerPtr.lLogPtr[i]
+	redoPool = make(chan *redoTx, LOGNUM)
+	for i := 0; i < LOGNUM; i++ {
+		redoPool <- headerPtr.logPtr[i]
 	}
 	return logHeadPtr
 }
 
 func _initRedoTx(size int) *redoTx {
 	tx := pnew(redoTx)
-	if size == LENTRYSIZE {
-		tx.large = true
-	}
+	tx.nEntry = size
 	tx.log = pmake([]entry, size)
 	runtime.PersistRange(unsafe.Pointer(tx), unsafe.Sizeof(*tx))
 	tx.m = make(map[unsafe.Pointer]int) // On abort m isn't used, so not in pmem
@@ -145,28 +132,16 @@ func _initRedoTx(size int) *redoTx {
 }
 
 func NewRedoTx() TX {
-	if redoPool[0] == nil {
+	if redoPool == nil {
 		log.Fatal("redo log not correctly initialized!")
 	}
-	t := <-redoPool[0]
-	return t
-}
-
-func NewLargeRedoTx() TX {
-	if redoPool[1] == nil {
-		log.Fatal("redo log not correctly initialized!")
-	}
-	t := <-redoPool[1]
+	t := <-redoPool
 	return t
 }
 
 func releaseRedoTx(t *redoTx) {
 	t.abort()
-	if t.large {
-		redoPool[1] <- t
-	} else {
-		redoPool[0] <- t
-	}
+	redoPool <- t
 }
 
 func (t *redoTx) ReadLog(ptr interface{}) (retVal interface{}) {
@@ -363,12 +338,12 @@ func (t *redoTx) writeLogEntry(ptr uintptr, data reflect.Value,
 
 		// Update log offset in header.
 		t.tail++
-		if t.large && t.tail >= LENTRYSIZE {
-			log.Fatal("[redoTx] Log: Too large transaction. Already logged ",
-				LENTRYSIZE, " entries")
-		} else if !t.large && t.tail >= SENTRYSIZE {
-			log.Fatal("[redoTx] Log: Too large transaction. Already logged ",
-				SENTRYSIZE, " entries")
+		if t.tail >= t.nEntry { // Expand log if necessary
+			newE := 2 * t.nEntry
+			newLog := pmake([]entry, newE)
+			copy(newLog, t.log)
+			t.log = newLog
+			t.nEntry = newE
 		}
 	}
 
@@ -526,11 +501,7 @@ func (t *redoTx) commit(skipVolData bool) error {
 
 // Resets every entry in the log
 func (t *redoTx) abort() error {
-	if t.large {
-		t.reset(LENTRYSIZE)
-	} else {
-		t.reset(SENTRYSIZE)
-	}
+	t.reset(t.tail)
 	return nil
 }
 
@@ -539,6 +510,11 @@ func (t *redoTx) reset(sz int) {
 	defer t.unLock()
 	t.level = 0
 	t.m = make(map[unsafe.Pointer]int)
+	t.log = t.log[:NUMENTRIES] // reset to original size
+	t.nEntry = NUMENTRIES
+	if sz > NUMENTRIES {
+		sz = NUMENTRIES
+	}
 	for i := sz - 1; i >= 0; i-- {
 		t.log[i].ptr = nil
 		t.log[i].data = nil

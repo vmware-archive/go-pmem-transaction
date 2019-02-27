@@ -23,8 +23,8 @@
  *   |          |       |
  *   V          V       V
  *  ---------------------------
- * | logPtr | logPtr |  ...    |      // Stored in pmem. Pointers to small &
- *  ---------------------------       // large logs
+ * | logPtr | logPtr |  ...    |      // Stored in pmem. Pointers to logs
+ *  ---------------------------
  *     |
  *     |      ---------------------
  *      ---> | entry | entry | ... |  // Stored in pmem to track pointers to
@@ -49,15 +49,6 @@ import (
 )
 
 type (
-	/* entry for each undo log update, stay in persistent heap with pointer
-	to data copy */
-	entry struct {
-		ptr           unsafe.Pointer
-		data          unsafe.Pointer
-		size          int
-		sliceElemSize int // Non-zero value indicates ptr points to slice header
-	}
-
 	undoTx struct {
 		log []entry
 
@@ -65,31 +56,23 @@ type (
 		tail int
 
 		// Level of nesting. Needed for nested transactions
-		level  int
-		large  bool
+		level int
+
+		// num of entries which can be stored in log
+		nEntry int
 		rlocks []*sync.RWMutex
 		wlocks []*sync.RWMutex
 	}
 
 	undoTxHeader struct {
-		magic   int
-		sLogPtr [SLOGNUM]*undoTx // small txs
-		lLogPtr [LLOGNUM]*undoTx // large txs
+		magic  int
+		logPtr [LOGNUM]*undoTx
 	}
-)
-
-const (
-	MAGIC      = 131071
-	LLOGNUM    = 12
-	SLOGNUM    = 500
-	LENTRYSIZE = 16 * 1024
-	SENTRYSIZE = 128
 )
 
 var (
 	txHeaderPtr *undoTxHeader
-	undoPool    [2]chan *undoTx // volatile structure for pointing to logs.
-	// pool[0] for small txs, pool[1] for large txs
+	undoPool    chan *undoTx // volatile structure for pointing to logs.
 )
 
 /* Does the first time initialization, else restores log structure and
@@ -102,11 +85,8 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 		// First time initialization
 		txHeaderPtr = pnew(undoTxHeader)
 		txHeaderPtr.magic = MAGIC
-		for i := 0; i < SLOGNUM; i++ {
-			txHeaderPtr.sLogPtr[i] = _initUndoTx(SENTRYSIZE)
-		}
-		for i := 0; i < LLOGNUM; i++ {
-			txHeaderPtr.lLogPtr[i] = _initUndoTx(LENTRYSIZE)
+		for i := 0; i < LOGNUM; i++ {
+			txHeaderPtr.logPtr[i] = _initUndoTx(NUMENTRIES)
 		}
 		runtime.PersistRange(unsafe.Pointer(txHeaderPtr),
 			unsafe.Sizeof(*txHeaderPtr))
@@ -119,33 +99,23 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 
 		// Recover data from previous pending transactions, if any
 		var tx *undoTx
-		for i := 0; i < SLOGNUM+LLOGNUM; i++ {
-			if i < SLOGNUM {
-				tx = txHeaderPtr.sLogPtr[i]
-			} else {
-				tx = txHeaderPtr.lLogPtr[i-SLOGNUM]
-			}
+		for i := 0; i < LOGNUM; i++ {
+			tx = txHeaderPtr.logPtr[i]
 			tx.wlocks = make([]*sync.RWMutex, 0, 0) // Resetting volatile locks
 			tx.rlocks = make([]*sync.RWMutex, 0, 0) // before checking for data
 			tx.abort()
 		}
 	}
-	undoPool[0] = make(chan *undoTx, SLOGNUM)
-	undoPool[1] = make(chan *undoTx, LLOGNUM)
-	for i := 0; i < SLOGNUM; i++ {
-		undoPool[0] <- txHeaderPtr.sLogPtr[i]
-	}
-	for i := 0; i < LLOGNUM; i++ {
-		undoPool[1] <- txHeaderPtr.lLogPtr[i]
+	undoPool = make(chan *undoTx, LOGNUM)
+	for i := 0; i < LOGNUM; i++ {
+		undoPool <- txHeaderPtr.logPtr[i]
 	}
 	return logHeadPtr
 }
 
 func _initUndoTx(size int) *undoTx {
 	tx := pnew(undoTx)
-	if size == LENTRYSIZE {
-		tx.large = true
-	}
+	tx.nEntry = size
 	tx.log = pmake([]entry, size)
 	runtime.PersistRange(unsafe.Pointer(&tx.log), unsafe.Sizeof(tx.log))
 	tx.wlocks = make([]*sync.RWMutex, 0, 0)
@@ -154,42 +124,48 @@ func _initUndoTx(size int) *undoTx {
 }
 
 func NewUndoTx() TX {
-	if undoPool[0] == nil {
+	if undoPool == nil {
 		log.Fatal("Undo log not correctly initialized!")
 	}
-	t := <-undoPool[0]
-	return t
-}
-
-func NewLargeUndoTx() TX {
-	if undoPool[1] == nil {
-		log.Fatal("Undo log not correctly initialized!")
-	}
-	t := <-undoPool[1]
+	t := <-undoPool
 	return t
 }
 
 func releaseUndoTx(t *undoTx) {
 	t.abort()
-	if t.large {
-		undoPool[1] <- t
-	} else {
-		undoPool[0] <- t
-	}
+	undoPool <- t
 }
 
+// also takes care of increasing/decreasing the number of entries log can hold
 func (t *undoTx) updateLogTail(tail int) {
-	// atomic update
-	if t.large && tail >= LENTRYSIZE {
-		log.Fatal("Too large transaction. Already logged ",
-			LENTRYSIZE, " entries")
-	} else if !t.large && tail >= SENTRYSIZE {
-		log.Fatal("Too large transaction. Already logged ",
-			SENTRYSIZE, " entries")
+	if tail >= t.nEntry {
+		newE := 2 * t.nEntry // Double number of entries which can be stored
+		newLog := pmake([]entry, newE)
+		copy(newLog, t.log)
+		runtime.PersistRange(unsafe.Pointer(&newLog[0]),
+			uintptr(newE)*unsafe.Sizeof(newLog[0])) // Persist new log
+		oldLogSliceHdr := (*sliceHeader)(unsafe.Pointer(&t.log))
+		newLogSliceHdr := (*sliceHeader)(unsafe.Pointer(&newLog))
+
+		// Essentially doing t.log = newLog, but this needs to be atomic
+		// Each of the below three updates are atomic
+		// A crash in the middle should be fine
+		oldLogSliceHdr.data = newLogSliceHdr.data
+		oldLogSliceHdr.cap = newLogSliceHdr.cap
+		oldLogSliceHdr.len = newLogSliceHdr.len
+
+		t.nEntry = newE
+		t.tail = tail
+		runtime.PersistRange(unsafe.Pointer(t), unsafe.Sizeof(*t))
+	} else if tail == 0 { // reset to original size
+		t.log = t.log[:NUMENTRIES]
+		t.nEntry = NUMENTRIES
+		t.tail = tail
+		runtime.PersistRange(unsafe.Pointer(t), unsafe.Sizeof(*t))
+	} else { // common case
+		t.tail = tail
+		runtime.PersistRange(unsafe.Pointer(&t.tail), unsafe.Sizeof(t.tail))
 	}
-	runtime.Fence() //Required as Log() does not issue any store fence
-	t.tail = tail
-	runtime.PersistRange(unsafe.Pointer(&t.tail), unsafe.Sizeof(t.tail))
 }
 
 type value struct {

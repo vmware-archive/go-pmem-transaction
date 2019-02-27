@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	LOGSIZE     int = 4 * 1024 * 1024
-	LBUFFERSIZE     = 512 * 1024
-	BUFFERSIZE      = 4 * 1024
+	LBUFFERSIZE = 512 * 1024 // TODO: This could be a problem in the future
+	MAGIC       = 131071
+	LOGNUM      = 512
+	NUMENTRIES  = 128
 )
 
 // transaction interface
@@ -30,6 +31,16 @@ type (
 		WLock(*sync.RWMutex)
 		Lock(*sync.RWMutex)
 		abort() error
+	}
+
+	// entry for each log update, stays in persistent heap.
+	// ptr is the address of variable to be updated
+	// data points to old data copy for undo log & new data for redo log
+	entry struct {
+		ptr           unsafe.Pointer
+		data          unsafe.Pointer
+		size          int
+		sliceElemSize int // Non-zero value indicates ptr points to slice header
 	}
 )
 
