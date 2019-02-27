@@ -142,7 +142,7 @@ func (t *undoTx) updateLogTail(tail int) {
 		newE := 2 * t.nEntry // Double number of entries which can be stored
 		newLog := pmake([]entry, newE)
 		copy(newLog, t.log)
-		runtime.PersistRange(unsafe.Pointer(&newLog[0]),
+		runtime.FlushRange(unsafe.Pointer(&newLog[0]),
 			uintptr(newE)*unsafe.Sizeof(newLog[0])) // Persist new log
 		oldLogSliceHdr := (*sliceHeader)(unsafe.Pointer(&t.log))
 		newLogSliceHdr := (*sliceHeader)(unsafe.Pointer(&newLog))
@@ -155,17 +155,17 @@ func (t *undoTx) updateLogTail(tail int) {
 		oldLogSliceHdr.len = newLogSliceHdr.len
 
 		t.nEntry = newE
-		t.tail = tail
-		runtime.PersistRange(unsafe.Pointer(t), unsafe.Sizeof(*t))
+		runtime.FlushRange(unsafe.Pointer(t), unsafe.Sizeof(*t))
 	} else if tail == 0 { // reset to original size
 		t.log = t.log[:NUMENTRIES]
 		t.nEntry = NUMENTRIES
-		t.tail = tail
-		runtime.PersistRange(unsafe.Pointer(t), unsafe.Sizeof(*t))
-	} else { // common case
-		t.tail = tail
-		runtime.PersistRange(unsafe.Pointer(&t.tail), unsafe.Sizeof(t.tail))
+		runtime.FlushRange(unsafe.Pointer(t), unsafe.Sizeof(*t))
 	}
+
+	// common case
+	runtime.Fence() // Required as Log() does not issue any store fence
+	t.tail = tail
+	runtime.PersistRange(unsafe.Pointer(&t.tail), unsafe.Sizeof(t.tail))
 }
 
 type value struct {

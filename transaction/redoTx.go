@@ -438,8 +438,10 @@ func (t *redoTx) End() error {
 		}
 		runtime.PersistRange(unsafe.Pointer(&t.log[0]),
 			uintptr(t.tail*(int)(unsafe.Sizeof(t.log[0]))))
-		t.committed = true
 		runtime.PersistRange(unsafe.Pointer(t), unsafe.Sizeof(*t))
+		t.committed = true
+		runtime.PersistRange(unsafe.Pointer(&t.committed),
+			unsafe.Sizeof(t.committed))
 		t.commit(false)
 	}
 	return nil
