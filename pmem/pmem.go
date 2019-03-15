@@ -46,8 +46,8 @@ func populateTxHeaderInRoot() {
 }
 
 // Init returns true if this was a first time initialization.
-func Init(fileName string, size int, offset int, gcPercent int) bool {
-	runtimeRootPtr, err := runtime.PmemInit(fileName, size, offset)
+func Init(fileName string) bool {
+	runtimeRootPtr, err := runtime.PmemInit(fileName)
 	if err != nil {
 		log.Fatal("Persistent memory initialization failed")
 	}
@@ -64,7 +64,6 @@ func Init(fileName string, size int, offset int, gcPercent int) bool {
 		rootPtr = (*pmemHeader)(runtimeRootPtr)
 		populateTxHeaderInRoot()
 	}
-	runtime.EnableGC(gcPercent)
 	m = new(sync.RWMutex)
 	return firstInit
 }

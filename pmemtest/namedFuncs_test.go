@@ -17,13 +17,6 @@ import (
 	"time"
 )
 
-const (
-	// pmem filesize must be multiple of 64 MB, specified by Go-pmem runtime
-	dataSize   = 64 * 1024 * 1024
-	pmemOffset = 0
-	gcPercent  = 100
-)
-
 type structPmemTest struct {
 	a     int
 	sptr  *structPmemTest
@@ -32,7 +25,7 @@ type structPmemTest struct {
 }
 
 func init() {
-	pmem.Init("tx_testFile", dataSize, pmemOffset, gcPercent)
+	pmem.Init("tx_testFile")
 }
 
 func TestAPIs(t *testing.T) {
