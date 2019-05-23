@@ -8,12 +8,13 @@ package pmem
 import (
 	"errors"
 	"fmt"
-	"github.com/vmware/go-pmem-transaction/transaction"
 	"log"
 	"reflect"
 	"runtime"
 	"sync"
 	"unsafe"
+
+	"github.com/vmware/go-pmem-transaction/transaction"
 )
 
 type (
@@ -45,13 +46,14 @@ func populateTxHeaderInRoot() {
 	rootPtr.redoTxHeadPtr = transaction.Init(rootPtr.redoTxHeadPtr, "redo")
 }
 
-// Init returns true if this was a first time initialization.
-func Init(fileName string) bool {
+// Init initializes persistent memory. It takes the path to a persistent
+// memory file as its argument. Init() returns an error if initialization
+// fails.
+func Init(fileName string) error {
 	runtimeRootPtr, err := runtime.PmemInit(fileName)
 	if err != nil {
-		log.Fatal("Persistent memory initialization failed")
+		return fmt.Errorf("Persistent memory initialization failed - %s", err)
 	}
-	var firstInit bool
 	if runtimeRootPtr == nil { // first time initialization
 		rootPtr = pnew(pmemHeader)
 		populateTxHeaderInRoot()
@@ -59,13 +61,12 @@ func Init(fileName string) bool {
 		runtime.PersistRange(unsafe.Pointer(rootPtr),
 			unsafe.Sizeof(*rootPtr))
 		runtime.SetRoot(unsafe.Pointer(rootPtr))
-		firstInit = true
 	} else {
 		rootPtr = (*pmemHeader)(runtimeRootPtr)
 		populateTxHeaderInRoot()
 	}
 	m = new(sync.RWMutex)
-	return firstInit
+	return err
 }
 
 type value struct {
@@ -81,9 +82,11 @@ type sliceHeader struct {
 	cap  int
 }
 
-// Make returns the interface to the slice asked for, slice being created in
-// persistent heap. Only supports slices for now. If an object with same name
-// already exists, it panics.
+// Make is used to create a named slice in persistent memory. If the named
+// slice already exists, then an interface to that slice is returned. But if the
+// slice is of a different type than the second argument, this function crashes.
+// If the named slice does not already exist, a new slice is created.
+// Only supports slices for now.
 // Syntax:   var s []int
 //           s = pmem.Make("myName", s, 10).([]int)
 func Make(name string, intf ...interface{}) interface{} {
@@ -92,14 +95,22 @@ func Make(name string, intf ...interface{}) interface{} {
 		log.Fatal("Can only pmem.Make slice")
 	}
 	m.RLock()
-	found, _ := exists(name)
+	found, i := exists(name)
 	m.RUnlock()
-	if found {
-		panic(fmt.Sprintf("Object %s already exists", name))
-	}
-
 	sTyp := v1.Type()
 	sTypString := sTyp.PkgPath() + sTyp.String()
+	if found {
+		obj := rootPtr.appData[i]
+		if string(obj.typ[:]) != sTypString {
+			log.Fatal("Object ", string(obj.name[:]), " was made before with type ",
+				string(obj.typ[:]))
+		}
+		slicePtrWithTyp := reflect.NewAt(sTyp, obj.ptr)
+		sliceVal := reflect.Indirect(slicePtrWithTyp)
+		return sliceVal.Interface()
+	}
+
+
 	v2 := reflect.ValueOf(intf[1])
 	sLen := int(v2.Int())
 	newV := reflect.PMakeSlice(sTyp, sLen, sLen)
@@ -128,8 +139,9 @@ func Make(name string, intf ...interface{}) interface{} {
 }
 
 // New is used to create named objects in persistent heap. This object would
-// survive crashes. Returns unsafe.Pointer to the object if the creation was
-// successful. If an object with same name already exists, it panics.
+// survive crashes. If the object already exists, New() returns a pointer to
+// that object. Otherwise, it creates a new object. This function panics in
+// case of any type mismatch.
 // Syntax: var a *int
 //         a = (*int)(pmem.New("myName", a))
 func New(name string, intf interface{}) unsafe.Pointer {
@@ -140,10 +152,15 @@ func New(name string, intf interface{}) unsafe.Pointer {
 	t := v.Type()
 	ts := t.PkgPath() + t.String()
 	m.RLock()
-	found, _ := exists(name)
+	found, i := exists(name)
 	m.RUnlock()
 	if found {
-		panic(fmt.Sprintf("Object %s already exists", name))
+		obj := rootPtr.appData[i]
+		if string(obj.typ[:]) != ts {
+			log.Fatal("Object ", string(obj.name[:]), " was made before with ",
+				"type ", string(obj.typ[:]))
+		}
+		return obj.ptr
 	}
 	nameByte := pmake([]byte, len(name))
 	tByte := pmake([]byte, len(ts))
@@ -205,31 +222,6 @@ func Get(name string, intf interface{}) unsafe.Pointer {
 	return obj.ptr
 }
 
-// GetSlice is Get() for named slices. Syntax same as Make()
-func GetSlice(name string, intf ...interface{}) interface{} {
-	v1 := reflect.ValueOf(intf[0])
-	if v1.Kind() != reflect.Slice {
-		log.Fatal("Can only GetSlice to retrieve named slices")
-	}
-	m.RLock()
-	found, i := exists(name)
-	defer m.RUnlock()
-	if !found {
-		return nil
-	}
-	sTyp := v1.Type()
-	sTypString := sTyp.PkgPath() + sTyp.String()
-	obj := rootPtr.appData[i]
-	if string(obj.typ[:]) != sTypString {
-		log.Fatal("Object ", string(obj.name[:]), " was made before with type ",
-			string(obj.typ[:]))
-	}
-	slicePtrWithTyp := reflect.NewAt(sTyp, obj.ptr)
-	sliceVal := reflect.Indirect(slicePtrWithTyp)
-	return sliceVal.Interface()
-}
-
-// The lock protecting appData should be acquired before calling this function
 func exists(name string) (found bool, i int) {
 	var obj namedObject
 	for i, obj = range rootPtr.appData {

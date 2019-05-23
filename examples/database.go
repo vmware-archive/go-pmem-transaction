@@ -9,6 +9,7 @@ package main
 import (
 	"math/rand"
 	"time"
+	"log"
 
 	"github.com/vmware/go-pmem-transaction/pmem"
 	"github.com/vmware/go-pmem-transaction/transaction"
@@ -95,20 +96,17 @@ func printNodes(rptr *root) {
 
 func main() {
 	rand.Seed(time.Now().UTC().UnixNano())
-	firstInit := pmem.Init("/mnt/ext4-pmem0/database")
+	err := pmem.Init("/mnt/ext4-pmem0/database")
+	if err != nil {
+		log.Fatal(err)
+	}
 	var rptr *root
-	if firstInit {
-		// Create a new named object called dbRoot and point it to rptr
-		rptr = (*root)(pmem.New("dbRoot", rptr))
+	// Retrieve named object named dbRoot
+	rptr = (*root)(pmem.New("dbRoot", rptr))
+	if rptr.magic != magic {
+		// First time initialization, or previous initialization did not
+		// complete successfully.
 		populateRoot(rptr)
-	} else {
-		// Retrieve the named object dbRoot
-		rptr = (*root)(pmem.Get("dbRoot", rptr))
-		if rptr.magic != magic {
-			// An object named dbRoot exists, but its initialization did not
-			// complete previously.
-			populateRoot(rptr)
-		}
 	}
 	addNode(rptr)    // Add a new node in the linked list
 	printNodes(rptr) // Print out the contents of the linked list
