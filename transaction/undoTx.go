@@ -147,7 +147,7 @@ func _initUndoTx(size int) *undoTx {
 		tx.large = true
 	}
 	tx.log = pmake([]entry, size)
-	runtime.PersistRange(unsafe.Pointer(tx), unsafe.Sizeof(*tx))
+	runtime.PersistRange(unsafe.Pointer(&tx.log), unsafe.Sizeof(tx.log))
 	tx.wlocks = make([]*sync.RWMutex, 0, 0)
 	tx.rlocks = make([]*sync.RWMutex, 0, 0)
 	return tx
@@ -187,10 +187,9 @@ func (t *undoTx) updateLogTail(tail int) {
 		log.Fatal("Too large transaction. Already logged ",
 			SENTRYSIZE, " entries")
 	}
-	runtime.Fence() //TODO: Check if this can be removed
+	runtime.Fence() //Required as Log() does not issue any store fence
 	t.tail = tail
-	runtime.FlushRange(unsafe.Pointer(&t.tail), unsafe.Sizeof(t.tail))
-	runtime.Fence()
+	runtime.PersistRange(unsafe.Pointer(&t.tail), unsafe.Sizeof(t.tail))
 }
 
 type value struct {
@@ -220,7 +219,7 @@ func (t *undoTx) Log(data ...interface{}) error {
 	if !runtime.InPmem(v1.Pointer()) {
 		return errors.New("[undoTx] Log: Can't log data in volatile memory")
 	}
-	switch kind := v1.Kind(); kind {
+	switch v1.Kind() {
 	case reflect.Slice:
 		t.logSlice(v1)
 	case reflect.Ptr:
@@ -241,8 +240,8 @@ func (t *undoTx) Log(data ...interface{}) error {
 		t.log[tail].size = size                         // size of data
 
 		// Flush logged data copy and entry.
-		runtime.PersistRange(t.log[tail].data, uintptr(size))
-		runtime.PersistRange(unsafe.Pointer(&t.log[tail]),
+		runtime.FlushRange(t.log[tail].data, uintptr(size))
+		runtime.FlushRange(unsafe.Pointer(&t.log[tail]),
 			unsafe.Sizeof(t.log[tail]))
 
 		// Update log offset in header.
@@ -276,8 +275,8 @@ func (t *undoTx) logSlice(v1 reflect.Value) {
 	t.log[tail].size = size                         // size of data
 
 	// Flush logged data copy and entry.
-	runtime.PersistRange(t.log[tail].data, uintptr(size))
-	runtime.PersistRange(unsafe.Pointer(&t.log[tail]),
+	runtime.FlushRange(t.log[tail].data, uintptr(size))
+	runtime.FlushRange(unsafe.Pointer(&t.log[tail]),
 		unsafe.Sizeof(t.log[tail]))
 
 	// Update log offset in header.
@@ -361,12 +360,12 @@ func (t *undoTx) End() error {
 
 		// Need to flush current value of logged areas
 		for i := t.tail - 1; i >= 0; i-- {
-			runtime.PersistRange(t.log[i].ptr, uintptr(t.log[i].size))
+			runtime.FlushRange(t.log[i].ptr, uintptr(t.log[i].size))
 			if t.log[i].sliceElemSize != 0 {
 				// ptr points to sliceHeader. So, need to persist the slice too
 				// TODO: We can discard the original slice & skip in this loop
 				shdr := (*sliceHeader)(t.log[i].ptr)
-				runtime.PersistRange(shdr.data, uintptr(shdr.len*
+				runtime.FlushRange(shdr.data, uintptr(shdr.len*
 					t.log[i].sliceElemSize))
 				t.log[i].sliceElemSize = 0 // reset
 			}
@@ -417,7 +416,7 @@ func (t *undoTx) abort() error {
 		original := origDataPtr[:t.log[i].size:t.log[i].size]
 		logdata := logDataPtr[:t.log[i].size:t.log[i].size]
 		copy(original, logdata)
-		runtime.PersistRange(t.log[i].ptr, uintptr(t.log[i].size))
+		runtime.FlushRange(t.log[i].ptr, uintptr(t.log[i].size))
 	}
 	t.updateLogTail(0)
 	return nil
