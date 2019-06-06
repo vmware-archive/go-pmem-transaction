@@ -144,20 +144,11 @@ func (t *undoTx) updateLogTail(tail int) {
 		copy(newLog, t.log)
 		runtime.FlushRange(unsafe.Pointer(&newLog[0]),
 			uintptr(newE)*unsafe.Sizeof(newLog[0])) // Persist new log
-		oldLogSliceHdr := (*sliceHeader)(unsafe.Pointer(&t.log))
-		newLogSliceHdr := (*sliceHeader)(unsafe.Pointer(&newLog))
-
-		// Essentially doing t.log = newLog, but this needs to be atomic
-		// Each of the below three updates are atomic
-		// A crash in the middle should be fine
-		oldLogSliceHdr.data = newLogSliceHdr.data
-		oldLogSliceHdr.cap = newLogSliceHdr.cap
-		oldLogSliceHdr.len = newLogSliceHdr.len
-
+		t.log = newLog
 		t.nEntry = newE
 		runtime.FlushRange(unsafe.Pointer(t), unsafe.Sizeof(*t))
-	} else if tail == 0 { // reset to original size
-		t.log = t.log[:NUMENTRIES]
+	} else if tail == 0 && t.nEntry > NUMENTRIES { // reset to original size
+		t.log = pmake([]entry, NUMENTRIES)
 		t.nEntry = NUMENTRIES
 		runtime.FlushRange(unsafe.Pointer(t), unsafe.Sizeof(*t))
 	}
