@@ -40,6 +40,7 @@ package transaction
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"reflect"
 	"runtime"
@@ -181,13 +182,21 @@ func (t *undoTx) ReadLog(interface{}) (retVal interface{}) {
 	return retVal
 }
 
-func (t *undoTx) Log(data ...interface{}) error {
-	if len(data) != 1 {
-		return errors.New("[undoTx] Log: Incorrectly used. Correct usage: " +
-			"Log(ptr) OR Log(slice)")
+// TODO: Logging slice of slice not supported
+func (t *undoTx) Log(intf ...interface{}) error {
+	doUpdate := false
+	if len(intf) == 2 { // If method is invoked with syntax Log(ptr, data),
+		// this method will do (*ptr = data) operation too
+		doUpdate = true
+	} else if len(intf) != 1 {
+		return errors.New("[undoTx] Log: Incorrectly called. Correct usage: " +
+			"Log(ptr, data) OR Log(ptr) OR Log(slice)")
 	}
-	v1 := reflect.ValueOf(data[0])
+	v1 := reflect.ValueOf(intf[0])
 	if !runtime.InPmem(v1.Pointer()) {
+		if doUpdate {
+			updateVar(v1, reflect.ValueOf(intf[1]))
+		}
 		return errors.New("[undoTx] Log: Can't log data in volatile memory")
 	}
 	switch v1.Kind() {
@@ -225,7 +234,33 @@ func (t *undoTx) Log(data ...interface{}) error {
 		debug.PrintStack()
 		return errors.New("[undoTx] Log: data must be pointer/slice")
 	}
+	if doUpdate {
+		// Do the actual a = b operation here
+		updateVar(v1, reflect.ValueOf(intf[1]))
+	}
 	return nil
+}
+
+func updateVar(ptr, data reflect.Value) {
+	if ptr.Kind() != reflect.Ptr {
+		panic(fmt.Sprintf("[undoTx] updateVar: Updating data pointed by"+
+			"ptr=%T not allowed", ptr))
+	}
+	oldV := reflect.Indirect(ptr)
+	if oldV.Kind() != reflect.Slice { // ptr.Kind() must be reflect.Ptr here
+		reflect.Indirect(ptr).Set(data)
+		return
+	}
+	// must be slice header update
+	if data.Kind() != reflect.Slice {
+		panic(fmt.Sprintf("[undoTx] updateVar: Don't know how to log data type"+
+			"ptr=%T, data = %T", oldV, data))
+	}
+	sourceVal := (*value)(unsafe.Pointer(&oldV))
+	sshdr := (*sliceHeader)(sourceVal.ptr) // source slice header
+	vptr := (*value)(unsafe.Pointer(&data))
+	dshdr := (*sliceHeader)(vptr.ptr) // data slice header
+	*sshdr = *dshdr
 }
 
 func (t *undoTx) logSlice(v1 reflect.Value) {
