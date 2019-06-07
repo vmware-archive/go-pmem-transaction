@@ -365,6 +365,25 @@ func TestUndoLogBasic(t *testing.T) {
 	y[0] = 10
 	transaction.Release(undoTx)
 	assertEqual(t, y[0], 10)
+
+	fmt.Println("Testing data structure commit when undoTx.Log() does update")
+	undoTx = transaction.NewUndoTx()
+	undoTx.Begin()
+	undoTx.Log(struct1, structLogTest{10, &struct1.i, slice1})
+	slice1[0] = 11
+	undoTx.End()
+	assertEqual(t, struct1.i, 10)
+	assertEqual(t, *struct1.iptr, 10)
+	assertEqual(t, struct1.slice[0], slice1[0])
+
+	fmt.Println("Testing data structure abort when undoTx.Log() does update")
+	undoTx.Begin()
+	undoTx.Log(struct1, structLogTest{20, &struct1.i, slice1})
+	slice1[0] = 22
+	transaction.Release(undoTx)
+	assertEqual(t, struct1.i, 10)
+	assertEqual(t, *struct1.iptr, 10)
+	assertEqual(t, struct1.slice[0], slice1[0])
 }
 
 func TestUndoLogExpand(t *testing.T) {
