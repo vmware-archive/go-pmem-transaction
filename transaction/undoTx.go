@@ -177,9 +177,36 @@ type sliceHeader struct {
 	cap  int
 }
 
-func (t *undoTx) ReadLog(interface{}) (retVal interface{}) {
-	// undoTx doesn't support this. TODO: Should we panic here?
+func (t *undoTx) ReadLog(intf ...interface{}) (retVal interface{}) {
+	if len(intf) == 2 {
+		return t.readSliceElem(intf[0], intf[1].(int))
+	} else if len(intf) == 3 {
+		return t.readSlice(intf[0], intf[1].(int), intf[2].(int))
+	} else if len(intf) != 1 {
+		panic("[undoTx] ReadLog: Incorrect number of args passed")
+	}
+	ptrV := reflect.ValueOf(intf[0])
+	switch ptrV.Kind() {
+	case reflect.Ptr:
+		data := reflect.Indirect(ptrV)
+		retVal = data.Interface()
+	default:
+		panic("[undoTx] ReadLog: Arg must be pointer")
+	}
 	return retVal
+}
+
+func (t *undoTx) readSliceElem(slicePtr interface{}, index int) interface{} {
+	ptrV := reflect.ValueOf(slicePtr)
+	s := reflect.Indirect(ptrV) // get to the reflect.Value of slice first
+	return s.Index(index).Interface()
+}
+
+func (t *undoTx) readSlice(slicePtr interface{}, stIndex int,
+	endIndex int) interface{} {
+	ptrV := reflect.ValueOf(slicePtr)
+	s := reflect.Indirect(ptrV) // get to the reflect.Value of slice first
+	return s.Slice(stIndex, endIndex).Interface()
 }
 
 // TODO: Logging slice of slice not supported
