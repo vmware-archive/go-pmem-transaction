@@ -24,7 +24,7 @@ type (
 	TX interface {
 		Begin() error
 		Log(...interface{}) error
-		ReadLog(interface{}) interface{}
+		ReadLog(...interface{}) interface{}
 		Exec(...interface{}) ([]reflect.Value, error)
 		End() error
 		RLock(*sync.RWMutex)

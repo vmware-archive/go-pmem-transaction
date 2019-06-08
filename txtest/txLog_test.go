@@ -386,6 +386,60 @@ func TestUndoLogBasic(t *testing.T) {
 	assertEqual(t, struct1.slice[0], slice1[0])
 }
 
+func TestReadLog(t *testing.T) {
+	testReadLog(t, "undo")
+	testReadLog(t, "redo")
+}
+
+func testReadLog(t *testing.T, txType string) {
+	resetData()
+	var tx transaction.TX
+	if txType == "undo" {
+		tx = transaction.NewUndoTx()
+		fmt.Println("For UndoTx")
+	} else {
+		tx = transaction.NewRedoTx()
+		fmt.Println("For RedoTx")
+	}
+
+	struct1.slice = pmake([]int, 10)
+	struct2.slice = pmake([]int, 100)
+	struct1.slice[0] = 9
+	struct2.slice[0] = 2
+	struct2.slice[20] = 1
+
+	fmt.Println("Testing TX.Readlog with 1 arg (ptr)")
+	tx.Begin()
+	// struct1.i = struct2.slice[0]+3
+	tx.Log(&struct1.i, tx.ReadLog(&struct2.slice[0]).(int)+3)
+	tx.End()
+	assertEqual(t, struct1.i, 5)
+
+	fmt.Println("Testing TX.Readlog with 2 args (read slice element)")
+	tx.Begin()
+	// struct1.slice = struct2.slice
+	tx.Log(&struct1.slice, struct2.slice)
+	// *j = struct1.slice[20] + 2
+	tx.Log(j, tx.ReadLog(&struct1.slice, 20).(int)+2)
+	tx.End()
+	assertEqual(t, *j, 3)
+	assertEqual(t, len(struct1.slice), 100)
+	assertEqual(t, struct1.slice[0], 2)
+
+	fmt.Println("Testing TX.Readlog with 3 args (read slice)")
+	struct2.slice[90] = 90
+	tx.Begin()
+	// struct1.slice = struct2.slice[88:92]
+	tx.Log(&struct1.slice, tx.ReadLog(&struct2.slice, 88, 92).([]int))
+	// *j = struct1.slice[2]
+	tx.Log(j, tx.ReadLog(&struct1.slice, 2).(int)+1)
+	tx.End()
+	transaction.Release(tx)
+	assertEqual(t, len(struct1.slice), 4)
+	assertEqual(t, struct1.slice[2], 90)
+	assertEqual(t, *j, 91)
+}
+
 func TestUndoLogExpand(t *testing.T) {
 	fmt.Println("Testing undo log expansion commit by logging more entries")
 	undoTx := transaction.NewUndoTx()

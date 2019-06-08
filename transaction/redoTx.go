@@ -144,9 +144,16 @@ func releaseRedoTx(t *redoTx) {
 	redoPool <- t
 }
 
-func (t *redoTx) ReadLog(ptr interface{}) (retVal interface{}) {
-	ptrV := reflect.ValueOf(ptr)
-	switch kind := ptrV.Kind(); kind {
+func (t *redoTx) ReadLog(intf ...interface{}) (retVal interface{}) {
+	if len(intf) == 2 {
+		return t.readSliceElem(intf[0], intf[1].(int))
+	} else if len(intf) == 3 {
+		return t.readSlice(intf[0], intf[1].(int), intf[2].(int))
+	} else if len(intf) != 1 {
+		panic("[redoTx] ReadLog: Incorrect number of args passed")
+	}
+	ptrV := reflect.ValueOf(intf[0])
+	switch ptrV.Kind() {
 	case reflect.Ptr:
 		oldVal := reflect.Indirect(ptrV)
 		var logData reflect.Value
@@ -181,8 +188,8 @@ func (t *redoTx) ReadLog(ptr interface{}) (retVal interface{}) {
 			logData = t.readLogEntry(ptrV.Pointer(), typ)
 			retVal = logData.Interface()
 		}
-	default: // TODO: Check if need to read & return slice
-		log.Fatal("[redoTx] ReadLog: Arg must be pointer/slice")
+	default:
+		log.Fatal("[redoTx] ReadLog: Arg must be pointer")
 	}
 	return retVal
 }
@@ -198,6 +205,59 @@ func (t *redoTx) readLogEntry(ptr uintptr, typ reflect.Type) (v reflect.Value) {
 	logDataPtr := reflect.NewAt(typ, t.log[tail].data)
 	v = reflect.Indirect(logDataPtr)
 	return v
+}
+
+func (t *redoTx) readSliceElem(slicePtr interface{}, index int) interface{} {
+	var retVal reflect.Value
+	ptrV := reflect.ValueOf(slicePtr)
+	sTyp := ptrV.Type().Elem() // type of slice
+	switch ptrV.Kind() {
+	case reflect.Ptr:
+		logData := t.readLogEntry(ptrV.Pointer(), sTyp) // read sliceheader 1st
+		v := (*value)(unsafe.Pointer(&logData))
+		newShdr := (*sliceHeader)(v.ptr)
+		if index > newShdr.len {
+			log.Fatal("[redoTx] readSliceElem: Index out of bounds")
+		}
+		elemType := sTyp.Elem() // type of elements in slice
+		elemPtr := uintptr(newShdr.data) + (uintptr(index) * elemType.Size())
+		retVal = t.readLogEntry(elemPtr, elemType)
+	default:
+		log.Fatal("[redoTx] readSliceElem: Arg must be pointer to slice")
+	}
+	return retVal.Interface()
+}
+
+func (t *redoTx) readSlice(slicePtr interface{}, stIndex int,
+	endIndex int) interface{} {
+	var retVal reflect.Value
+	ptrV := reflect.ValueOf(slicePtr)
+	sTyp := ptrV.Type().Elem() // type of slice
+	switch ptrV.Kind() {
+	case reflect.Ptr:
+		logData := t.readLogEntry(ptrV.Pointer(), sTyp) // read sliceheader 1st
+		v := (*value)(unsafe.Pointer(&logData))
+		newShdr := (*sliceHeader)(v.ptr)
+		origL := newShdr.len
+		if stIndex < 0 || endIndex > origL {
+			log.Fatal("[redoTx] readSlice: Index out of bounds")
+		} else if stIndex > endIndex {
+			log.Fatal("[redoTx] readSlice: 1st index should be <= 2nd index")
+		}
+		elemType := sTyp.Elem() // type of elements in slice
+		sLen := endIndex - stIndex
+		s := reflect.PMakeSlice(sTyp, sLen, sLen)
+		for i := 0; i < sLen; i++ {
+			sElem := s.Index(i)
+			elemPtr := uintptr(newShdr.data) + (uintptr(stIndex+i) *
+				elemType.Size())
+			sElem.Set(t.readLogEntry(elemPtr, elemType))
+		}
+		retVal = s
+	default:
+		log.Fatal("[redoTx] readSlice: Arg must be pointer to slice")
+	}
+	return retVal.Interface()
 }
 
 func checkDataTypes(newV reflect.Value, v1 reflect.Value) (err error) {
