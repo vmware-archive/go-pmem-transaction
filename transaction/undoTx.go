@@ -58,8 +58,6 @@ type (
 		// Level of nesting. Needed for nested transactions
 		level int
 
-		// num of entries which can be stored in log
-		nEntry int
 		rlocks []*sync.RWMutex
 		wlocks []*sync.RWMutex
 	}
@@ -115,7 +113,6 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 
 func _initUndoTx(size int) *undoTx {
 	tx := pnew(undoTx)
-	tx.nEntry = size
 	tx.log = pmake([]entry, size)
 	runtime.PersistRange(unsafe.Pointer(&tx.log), unsafe.Sizeof(tx.log))
 	tx.wlocks = make([]*sync.RWMutex, 0, 0)
@@ -136,23 +133,30 @@ func releaseUndoTx(t *undoTx) {
 	undoPool <- t
 }
 
-// also takes care of increasing/decreasing the number of entries log can hold
-func (t *undoTx) updateLogTail(tail int) {
-	if tail >= t.nEntry {
-		newE := 2 * t.nEntry // Double number of entries which can be stored
+func (t *undoTx) resetLogTail() {
+	runtime.Fence()
+	if t.tail != 0 {
+		t.tail = 0
+		runtime.PersistRange(unsafe.Pointer(&t.tail), unsafe.Sizeof(t.tail))
+	}
+	// reset to original size
+	t.log = pmake([]entry, NUMENTRIES)
+	runtime.PersistRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
+}
+
+// Also takes care of increasing the number of entries underlying log can hold
+func (t *undoTx) increaseLogTail() {
+	tail := t.tail + 1 // new tail
+	if tail >= cap(t.log) {
+		newE := 2 * cap(t.log) // Double number of entries which can be stored
 		newLog := pmake([]entry, newE)
 		copy(newLog, t.log)
-		runtime.FlushRange(unsafe.Pointer(&newLog[0]),
+		runtime.PersistRange(unsafe.Pointer(&newLog[0]),
 			uintptr(newE)*unsafe.Sizeof(newLog[0])) // Persist new log
 		t.log = newLog
-		t.nEntry = newE
-		runtime.FlushRange(unsafe.Pointer(t), unsafe.Sizeof(*t))
-	} else if tail == 0 && t.nEntry > NUMENTRIES { // reset to original size
-		t.log = pmake([]entry, NUMENTRIES)
-		t.nEntry = NUMENTRIES
-		runtime.FlushRange(unsafe.Pointer(t), unsafe.Sizeof(*t))
+		// flush, as there is a fence immediately after this
+		runtime.FlushRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
 	}
-
 	// common case
 	runtime.Fence() // Required as Log() does not issue any store fence
 	t.tail = tail
@@ -212,7 +216,7 @@ func (t *undoTx) Log(data ...interface{}) error {
 			unsafe.Sizeof(t.log[tail]))
 
 		// Update log offset in header.
-		t.updateLogTail(tail + 1)
+		t.increaseLogTail()
 		if oldv.Kind() == reflect.Slice {
 			// Pointer to slice was passed to Log(). So, log slice elements too
 			t.logSlice(oldv)
@@ -247,7 +251,7 @@ func (t *undoTx) logSlice(v1 reflect.Value) {
 		unsafe.Sizeof(t.log[tail]))
 
 	// Update log offset in header.
-	t.updateLogTail(tail + 1)
+	t.increaseLogTail()
 }
 
 /* Exec function receives a variable number of interfaces as its arguments.
@@ -337,7 +341,7 @@ func (t *undoTx) End() error {
 				t.log[i].sliceElemSize = 0 // reset
 			}
 		}
-		t.updateLogTail(0) // discard all logs.
+		t.resetLogTail() // discard all logs.
 	}
 	return nil
 }
@@ -369,13 +373,8 @@ func (t *undoTx) unLock() {
 
 func (t *undoTx) abort() error {
 	defer t.unLock()
-	if t.tail == 0 {
-		// Nothing stored in this log
-		return nil
-	}
 
-	// Has uncommitted log. Replay undo logs
-	// Order last updates first, during abort
+	// Replay undo logs. Order last updates first, during abort
 	t.level = 0
 	for i := t.tail - 1; i >= 0; i-- {
 		origDataPtr := (*[LBUFFERSIZE]byte)(t.log[i].ptr)
@@ -385,6 +384,6 @@ func (t *undoTx) abort() error {
 		copy(original, logdata)
 		runtime.FlushRange(t.log[i].ptr, uintptr(t.log[i].size))
 	}
-	t.updateLogTail(0)
+	t.resetLogTail()
 	return nil
 }
