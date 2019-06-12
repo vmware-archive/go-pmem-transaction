@@ -9,8 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/vmware/go-pmem-transaction/transaction"
-	"os"
-	"os/exec"
 	"runtime"
 	"sync"
 	"testing"
@@ -48,7 +46,7 @@ func BenchmarkUndoLogInt(b *testing.B) {
 func BenchmarkUndoLogSlice(b *testing.B) {
 	struct1 = pnew(structLogTest)
 	struct1.slice = pmake([]int, 10000)
-	tx := transaction.NewLargeUndoTx()
+	tx := transaction.NewUndoTx()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		tx.Begin()
@@ -62,7 +60,7 @@ func BenchmarkUndoLogSlice(b *testing.B) {
 func BenchmarkUndoLogStruct(b *testing.B) {
 	struct1 = pnew(structLogTest)
 	struct1.slice = pmake([]int, 10000)
-	tx := transaction.NewLargeUndoTx()
+	tx := transaction.NewUndoTx()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		tx.Begin()
@@ -155,7 +153,7 @@ func BenchmarkRedoLogSlice(b *testing.B) {
 	struct2 = pnew(structLogTest)
 	struct1.slice = pmake([]int, 10000)
 	struct2.slice = pmake([]int, 10000)
-	tx := transaction.NewLargeRedoTx()
+	tx := transaction.NewRedoTx()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		tx.Begin()
@@ -369,56 +367,70 @@ func TestUndoLogBasic(t *testing.T) {
 	assertEqual(t, y[0], 10)
 }
 
-func crashUndoLog() {
+func TestUndoLogExpand(t *testing.T) {
+	fmt.Println("Testing undo log expansion commit by logging more entries")
 	undoTx := transaction.NewUndoTx()
+	sizeToCheck := transaction.NUMENTRIES*4 + 1
+	slice1 = pmake([]int, sizeToCheck)
 	undoTx.Begin()
-	for i := 0; i < transaction.SENTRYSIZE+1; i++ {
-		undoTx.Log(struct1)
+	for i := 0; i < sizeToCheck; i++ {
+		undoTx.Log(&slice1[i])
+		slice1[i] = i
 	}
 	undoTx.End()
 	transaction.Release(undoTx)
+	for i := 0; i < sizeToCheck; i++ {
+		assertEqual(t, slice1[i], i)
+	}
+
+	fmt.Println("Testing undo log expansion abort")
+	slice1 = pmake([]int, sizeToCheck)
+	sizeToAbort := transaction.NUMENTRIES*2 + 1
+	undoTx = transaction.NewUndoTx()
+	undoTx.Begin()
+	for i := 0; i < sizeToCheck; i++ {
+		undoTx.Log(&slice1[i])
+		slice1[i] = i
+		if i == sizeToAbort {
+			break
+		}
+	}
+	transaction.Release(undoTx)
+	for i := 0; i < sizeToCheck; i++ {
+		assertEqual(t, slice1[i], 0)
+	}
 }
 
-func crashLargeUndoLog() {
-	largeUndoTx := transaction.NewLargeUndoTx()
-	largeUndoTx.Begin()
-	for i := 0; i < transaction.LENTRYSIZE+1; i++ {
-		largeUndoTx.Log(struct2)
+func TestRedoLogExpand(t *testing.T) {
+	fmt.Println("Testing redo log expansion commit by logging more entries")
+	redoTx := transaction.NewRedoTx()
+	sizeToCheck := transaction.NUMENTRIES*4 + 1
+	slice1 = pmake([]int, sizeToCheck)
+	redoTx.Begin()
+	for i := 0; i < sizeToCheck; i++ {
+		redoTx.Log(&slice1[i], i)
 	}
-	largeUndoTx.End()
-	transaction.Release(largeUndoTx)
-}
+	redoTx.End()
+	transaction.Release(redoTx)
+	for i := 0; i < sizeToCheck; i++ {
+		assertEqual(t, slice1[i], i)
+	}
 
-func TestUndoLogCrash1(t *testing.T) {
-	resetData()
-	fmt.Println("Testing log crash due to TX being too big for UndoTx")
-	if os.Getenv("CRASH_RUN") == "1" {
-		crashUndoLog()
-		return
+	fmt.Println("Testing redo log expansion abort")
+	slice1 = pmake([]int, sizeToCheck)
+	sizeToAbort := transaction.NUMENTRIES*2 + 1
+	redoTx = transaction.NewRedoTx()
+	redoTx.Begin()
+	for i := 0; i < sizeToCheck; i++ {
+		redoTx.Log(&slice1[i], i)
+		if i == sizeToAbort {
+			break
+		}
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestUndoLogCrash1")
-	cmd.Env = append(os.Environ(), "CRASH_RUN=1")
-	err := cmd.Run()
-	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
-		return
+	transaction.Release(redoTx)
+	for i := 0; i < sizeToCheck; i++ {
+		assertEqual(t, slice1[i], 0)
 	}
-	t.Fatalf("process ran with err %v, want exit status 1", err)
-}
-
-func TestUndoLogCrash2(t *testing.T) {
-	resetData()
-	fmt.Println("Testing log crash due to TX being too big for LargeUndoTx")
-	if os.Getenv("CRASH_RUN") == "1" {
-		crashLargeUndoLog()
-		return
-	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestUndoLogCrash2")
-	cmd.Env = append(os.Environ(), "CRASH_RUN=1")
-	err := cmd.Run()
-	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
-		return
-	}
-	t.Fatalf("process ran with err %v, want exit status 1", err)
 }
 
 func TestConcurrentUndoLog(t *testing.T) {
