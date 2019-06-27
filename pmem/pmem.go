@@ -91,13 +91,15 @@ func Make(name string, intf ...interface{}) interface{} {
 	if v1.Kind() != reflect.Slice {
 		log.Fatal("Can only pmem.Make slice")
 	}
-	found, i := exists(name)
+	m.RLock()
+	found, _ := exists(name)
+	m.RUnlock()
+	if found {
+		panic(fmt.Sprintf("Object %s already exists", name))
+	}
+
 	sTyp := v1.Type()
 	sTypString := sTyp.PkgPath() + sTyp.String()
-	if found {
-		obj := rootPtr.appData[i]
-		panic(fmt.Sprintf("Object %s already exists", string(obj.name[:])))
-	}
 	v2 := reflect.ValueOf(intf[1])
 	sLen := int(v2.Int())
 	newV := reflect.PMakeSlice(sTyp, sLen, sLen)
@@ -137,10 +139,11 @@ func New(name string, intf interface{}) unsafe.Pointer {
 	}
 	t := v.Type()
 	ts := t.PkgPath() + t.String()
-	found, i := exists(name)
+	m.RLock()
+	found, _ := exists(name)
+	m.RUnlock()
 	if found {
-		obj := rootPtr.appData[i]
-		panic(fmt.Sprintf("Object %s already exists", string(obj.name[:])))
+		panic(fmt.Sprintf("Object %s already exists", name))
 	}
 	nameByte := pmake([]byte, len(name))
 	tByte := pmake([]byte, len(ts))
@@ -164,17 +167,17 @@ func New(name string, intf interface{}) unsafe.Pointer {
 // Delete deletes a named object created using New or Make. Returns error if
 // no such object exists
 func Delete(name string) error {
+	m.Lock()
 	found, i := exists(name)
+	defer m.Unlock()
 	if !found {
 		return errors.New("No such object allocated before")
 	}
 	tx := transaction.NewUndoTx()
-	m.Lock()
 	tx.Begin()
 	tx.Log(&rootPtr.appData)
 	rootPtr.appData = append(rootPtr.appData[:i], rootPtr.appData[i+1:]...)
 	tx.End()
-	m.Unlock()
 	transaction.Release(tx)
 	return nil
 }
@@ -182,7 +185,9 @@ func Delete(name string) error {
 // Get the named object if it exists. Returns an unsafe pointer to the object
 // if it was made before. Return nil otherwise. Syntax same as New()
 func Get(name string, intf interface{}) unsafe.Pointer {
+	m.RLock()
 	found, i := exists(name)
+	defer m.RUnlock()
 	if !found {
 		return nil
 	}
@@ -206,7 +211,9 @@ func GetSlice(name string, intf ...interface{}) interface{} {
 	if v1.Kind() != reflect.Slice {
 		log.Fatal("Can only GetSlice to retrieve named slices")
 	}
+	m.RLock()
 	found, i := exists(name)
+	defer m.RUnlock()
 	if !found {
 		return nil
 	}
@@ -222,18 +229,14 @@ func GetSlice(name string, intf ...interface{}) interface{} {
 	return sliceVal.Interface()
 }
 
+// The lock protecting appData should be acquired before calling this function
 func exists(name string) (found bool, i int) {
 	var obj namedObject
-	m.RLock()
 	for i, obj = range rootPtr.appData {
 		if string(obj.name[:]) == name {
 			found = true
 			break
 		}
 	}
-	m.RUnlock()
-	if !found {
-		return found, -1
-	}
-	return found, i
+	return
 }
