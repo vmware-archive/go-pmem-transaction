@@ -102,7 +102,10 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 			tx = txHeaderPtr.logPtr[i]
 			tx.wlocks = make([]*sync.RWMutex, 0, 0) // Resetting volatile locks
 			tx.rlocks = make([]*sync.RWMutex, 0, 0) // before checking for data
-			tx.abort()
+			// The value of tail is unreliable here as it might have been set
+			// as 0 during a previous recovery. Hence ask abort() to reallocate
+			// the array for the log entries.
+			tx.abort(true)
 		}
 	}
 	undoPool = make(chan *undoTx, LOGNUM)
@@ -130,19 +133,41 @@ func NewUndoTx() TX {
 }
 
 func releaseUndoTx(t *undoTx) {
-	t.abort()
+	// Reset the pointers in the log entries, but need not allocate a new
+	// backing array
+	t.abort(false)
 	undoPool <- t
 }
 
-func (t *undoTx) resetLogTail() {
+func (t *undoTx) setTail(tail int) {
+	t.tail = tail
+	runtime.PersistRange(unsafe.Pointer(&t.tail), unsafe.Sizeof(t.tail))
+}
+
+// The realloc parameter indicates if the backing array for the log entries
+// need to be reallocated.
+func (t *undoTx) resetLogTail(realloc bool) {
+	tail := t.tail
 	runtime.Fence()
 	if t.tail != 0 {
-		t.tail = 0
-		runtime.PersistRange(unsafe.Pointer(&t.tail), unsafe.Sizeof(t.tail))
+		t.setTail(0)
 	}
-	// reset to original size
-	t.log = pmake([]entry, NUMENTRIES)
-	runtime.PersistRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
+
+	if realloc || cap(t.log) > NUMENTRIES {
+		// Allocate a new backing array if realloc is true or if the array was
+		// expanded to accommodate more log entries.
+		t.log = pmake([]entry, NUMENTRIES)
+		runtime.PersistRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
+	} else {
+		// Zero out the pointers in the log entries so that the data pointed by
+		// them will be garbage collected.
+		for i:=0;i<tail;i++ {
+			t.log[i].ptr = nil
+			t.log[i].data = nil
+			runtime.FlushRange(unsafe.Pointer(&t.log[i].ptr), 2 * unsafe.Sizeof(t.log[i].ptr))
+		}
+		runtime.Fence()
+	}
 }
 
 // Also takes care of increasing the number of entries underlying log can hold
@@ -160,8 +185,7 @@ func (t *undoTx) increaseLogTail() {
 	}
 	// common case
 	runtime.Fence() // Required as Log() does not issue any store fence
-	t.tail = tail
-	runtime.PersistRange(unsafe.Pointer(&t.tail), unsafe.Sizeof(t.tail))
+	t.setTail(tail)
 }
 
 type value struct {
@@ -409,7 +433,7 @@ func (t *undoTx) End() error {
 				t.log[i].sliceElemSize = 0 // reset
 			}
 		}
-		t.resetLogTail() // discard all logs.
+		t.resetLogTail(false) // discard all logs.
 	}
 	return nil
 }
@@ -439,9 +463,10 @@ func (t *undoTx) unLock() {
 	t.rlocks = make([]*sync.RWMutex, 0, 0)
 }
 
-func (t *undoTx) abort() error {
+// The realloc parameter indicates if the backing array for the log entries
+// need to be reallocated.
+func (t *undoTx) abort(realloc bool) error {
 	defer t.unLock()
-
 	// Replay undo logs. Order last updates first, during abort
 	t.level = 0
 	for i := t.tail - 1; i >= 0; i-- {
@@ -452,6 +477,6 @@ func (t *undoTx) abort() error {
 		copy(original, logdata)
 		runtime.FlushRange(t.log[i].ptr, uintptr(t.log[i].size))
 	}
-	t.resetLogTail()
+	t.resetLogTail(realloc)
 	return nil
 }

@@ -30,7 +30,6 @@ type (
 		RLock(*sync.RWMutex)
 		WLock(*sync.RWMutex)
 		Lock(*sync.RWMutex)
-		abort() error
 	}
 
 	// entry for each log update, stays in persistent heap.
