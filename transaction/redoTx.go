@@ -59,6 +59,9 @@ type (
 		// Level of nesting. Needed for nested transactions
 		level int
 
+		// Index of the log handle within redoArray
+		index int
+
 		// num of entries which can be stored in log
 		nEntry    int
 		committed bool
@@ -75,7 +78,7 @@ type (
 
 var (
 	headerPtr *redoTxHeader
-	redoPool  chan *redoTx // volatile structure for pointing to logs.
+	redoArray *bitmap
 )
 
 /* Does the first time initialization, else restores log structure and
@@ -83,15 +86,21 @@ var (
  * so the application can store this in its pmem appRoot.
  */
 func initRedoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
+	redoArray = newBitmap(LOGNUM)
 	if logHeadPtr == nil {
 		// First time initialization
 		headerPtr = pnew(redoTxHeader)
-		headerPtr.magic = MAGIC
 		for i := 0; i < LOGNUM; i++ {
-			headerPtr.logPtr[i] = _initRedoTx(NUMENTRIES)
+			headerPtr.logPtr[i] = _initRedoTx(NUMENTRIES, i)
 		}
-		runtime.PersistRange(unsafe.Pointer(headerPtr),
-			unsafe.Sizeof(*headerPtr))
+		// Write the magic constant after the transaction handles are persisted.
+		// NewRedoTx() can then check this constant to ensure all tx handles
+		// are properly initialized before releasing any.
+		runtime.PersistRange(unsafe.Pointer(&headerPtr.logPtr),
+			unsafe.Sizeof(headerPtr.logPtr))
+		headerPtr.magic = MAGIC
+		runtime.PersistRange(unsafe.Pointer(&headerPtr.magic),
+			unsafe.Sizeof(headerPtr.magic))
 		logHeadPtr = unsafe.Pointer(headerPtr)
 	} else {
 		headerPtr = (*redoTxHeader)(logHeadPtr)
@@ -104,6 +113,7 @@ func initRedoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 		var tx *redoTx
 		for i := 0; i < LOGNUM; i++ {
 			tx = headerPtr.logPtr[i]
+			tx.index = i
 			tx.wlocks = make([]*sync.RWMutex, 0, 0) // Resetting volatile locks
 			tx.rlocks = make([]*sync.RWMutex, 0, 0) // before checking for data
 			if tx.committed {
@@ -113,18 +123,16 @@ func initRedoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 			}
 		}
 	}
-	redoPool = make(chan *redoTx, LOGNUM)
-	for i := 0; i < LOGNUM; i++ {
-		redoPool <- headerPtr.logPtr[i]
-	}
+
 	return logHeadPtr
 }
 
-func _initRedoTx(size int) *redoTx {
+func _initRedoTx(size, index int) *redoTx {
 	tx := pnew(redoTx)
 	tx.nEntry = size
 	tx.log = pmake([]entry, size)
 	runtime.PersistRange(unsafe.Pointer(tx), unsafe.Sizeof(*tx))
+	tx.index = index
 	tx.m = make(map[unsafe.Pointer]int) // On abort m isn't used, so not in pmem
 	tx.wlocks = make([]*sync.RWMutex, 0, 0)
 	tx.rlocks = make([]*sync.RWMutex, 0, 0)
@@ -132,16 +140,16 @@ func _initRedoTx(size int) *redoTx {
 }
 
 func NewRedoTx() TX {
-	if redoPool == nil {
+	if headerPtr == nil || headerPtr.magic != MAGIC {
 		log.Fatal("redo log not correctly initialized!")
 	}
-	t := <-redoPool
-	return t
+	index := redoArray.nextAvailable()
+	return headerPtr.logPtr[index]
 }
 
 func releaseRedoTx(t *redoTx) {
 	t.abort()
-	redoPool <- t
+	redoArray.clearBit(t.index)
 }
 
 func (t *redoTx) ReadLog(intf ...interface{}) (retVal interface{}) {
