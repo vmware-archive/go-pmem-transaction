@@ -59,6 +59,9 @@ type (
 		// Level of nesting. Needed for nested transactions
 		level int
 
+		// Index of the log handle within undoArray
+		index int
+
 		rlocks []*sync.RWMutex
 		wlocks []*sync.RWMutex
 	}
@@ -71,7 +74,7 @@ type (
 
 var (
 	txHeaderPtr *undoTxHeader
-	undoPool    chan *undoTx // volatile structure for pointing to logs.
+	undoArray   *bitmap
 )
 
 /* Does the first time initialization, else restores log structure and
@@ -80,15 +83,21 @@ var (
  * so the application can store it in its pmem appRoot.
  */
 func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
+	undoArray = newBitmap(LOGNUM)
 	if logHeadPtr == nil {
 		// First time initialization
 		txHeaderPtr = pnew(undoTxHeader)
-		txHeaderPtr.magic = MAGIC
 		for i := 0; i < LOGNUM; i++ {
-			txHeaderPtr.logPtr[i] = _initUndoTx(NUMENTRIES)
+			txHeaderPtr.logPtr[i] = _initUndoTx(NUMENTRIES, i)
 		}
-		runtime.PersistRange(unsafe.Pointer(txHeaderPtr),
-			unsafe.Sizeof(*txHeaderPtr))
+		// Write the magic constant after the transaction handles are persisted.
+		// NewUndoTx() can then check this constant to ensure all tx handles
+		// are properly initialized before releasing any.
+		runtime.PersistRange(unsafe.Pointer(&txHeaderPtr.logPtr),
+			unsafe.Sizeof(txHeaderPtr.logPtr))
+		txHeaderPtr.magic = MAGIC
+		runtime.PersistRange(unsafe.Pointer(&txHeaderPtr.magic),
+			unsafe.Sizeof(txHeaderPtr.magic))
 		logHeadPtr = unsafe.Pointer(txHeaderPtr)
 	} else {
 		txHeaderPtr = (*undoTxHeader)(logHeadPtr)
@@ -100,6 +109,7 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 		var tx *undoTx
 		for i := 0; i < LOGNUM; i++ {
 			tx = txHeaderPtr.logPtr[i]
+			tx.index = i
 			tx.wlocks = make([]*sync.RWMutex, 0, 0) // Resetting volatile locks
 			tx.rlocks = make([]*sync.RWMutex, 0, 0) // before checking for data
 			// The value of tail is unreliable here as it might have been set
@@ -108,35 +118,33 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 			tx.abort(true)
 		}
 	}
-	undoPool = make(chan *undoTx, LOGNUM)
-	for i := 0; i < LOGNUM; i++ {
-		undoPool <- txHeaderPtr.logPtr[i]
-	}
+
 	return logHeadPtr
 }
 
-func _initUndoTx(size int) *undoTx {
+func _initUndoTx(size, index int) *undoTx {
 	tx := pnew(undoTx)
 	tx.log = pmake([]entry, size)
 	runtime.PersistRange(unsafe.Pointer(&tx.log), unsafe.Sizeof(tx.log))
 	tx.wlocks = make([]*sync.RWMutex, 0, 0)
 	tx.rlocks = make([]*sync.RWMutex, 0, 0)
+	tx.index = index
 	return tx
 }
 
 func NewUndoTx() TX {
-	if undoPool == nil {
+	if txHeaderPtr == nil || txHeaderPtr.magic != MAGIC {
 		log.Fatal("Undo log not correctly initialized!")
 	}
-	t := <-undoPool
-	return t
+	index := undoArray.nextAvailable()
+	return txHeaderPtr.logPtr[index]
 }
 
 func releaseUndoTx(t *undoTx) {
 	// Reset the pointers in the log entries, but need not allocate a new
 	// backing array
 	t.abort(false)
-	undoPool <- t
+	undoArray.clearBit(t.index)
 }
 
 func (t *undoTx) setTail(tail int) {
@@ -161,10 +169,10 @@ func (t *undoTx) resetLogTail(realloc bool) {
 	} else {
 		// Zero out the pointers in the log entries so that the data pointed by
 		// them will be garbage collected.
-		for i:=0;i<tail;i++ {
+		for i := 0; i < tail; i++ {
 			t.log[i].ptr = nil
 			t.log[i].data = nil
-			runtime.FlushRange(unsafe.Pointer(&t.log[i].ptr), 2 * unsafe.Sizeof(t.log[i].ptr))
+			runtime.FlushRange(unsafe.Pointer(&t.log[i].ptr), 2*unsafe.Sizeof(t.log[i].ptr))
 		}
 		runtime.Fence()
 	}
