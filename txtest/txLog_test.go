@@ -384,6 +384,26 @@ func TestUndoLogBasic(t *testing.T) {
 	assertEqual(t, struct1.i, 10)
 	assertEqual(t, *struct1.iptr, 10)
 	assertEqual(t, struct1.slice[0], slice1[0])
+
+	fmt.Println("Testing variable update when the new value is nil")
+	undoTx = transaction.NewUndoTx()
+	undoTx.Begin()
+	undoTx.Log(&struct1, nil)
+	undoTx.End()
+	if struct1 != nil {
+		assertEqual(t, 0, 1) // Assert
+	}
+
+	fmt.Println("Testing logging when old slice value is empty")
+	struct2.slice = pmake([]int, 0, 0)
+	assertEqual(t, len(struct2.slice), 0)
+	undoTx.Begin()
+	undoTx.Log(&slice2[2], 10)
+	undoTx.Log(&struct2.slice, slice2)
+	undoTx.End()
+	transaction.Release(undoTx)
+	assertEqual(t, struct2.slice[2], slice2[2])
+	assertEqual(t, len(struct2.slice), len(slice2))
 }
 
 func TestReadLog(t *testing.T) {

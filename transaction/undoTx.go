@@ -275,7 +275,13 @@ func updateVar(ptr, data reflect.Value) {
 	}
 	oldV := reflect.Indirect(ptr)
 	if oldV.Kind() != reflect.Slice { // ptr.Kind() must be reflect.Ptr here
-		reflect.Indirect(ptr).Set(data)
+		if data.Kind() == reflect.Invalid {
+			// data has <nil> value
+			z := reflect.Zero(oldV.Type())
+			reflect.Indirect(ptr).Set(z)
+		} else {
+			reflect.Indirect(ptr).Set(data)
+		}
 		return
 	}
 	// must be slice header update
