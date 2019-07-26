@@ -143,7 +143,9 @@ func NewUndoTx() TX {
 func releaseUndoTx(t *undoTx) {
 	// Reset the pointers in the log entries, but need not allocate a new
 	// backing array
-	t.abort(false)
+	if t.tail > 0 {
+		t.abort(false)
+	}
 	undoArray.clearBit(t.index)
 }
 
@@ -161,7 +163,7 @@ func (t *undoTx) resetLogTail(realloc bool) {
 		t.setTail(0)
 	}
 
-	if realloc || cap(t.log) > NUMENTRIES {
+	if realloc {
 		// Allocate a new backing array if realloc is true or if the array was
 		// expanded to accommodate more log entries.
 		t.log = pmake([]entry, NUMENTRIES)
@@ -441,7 +443,9 @@ func (t *undoTx) End() error {
 				t.log[i].sliceElemSize = 0 // reset
 			}
 		}
-		t.resetLogTail(false) // discard all logs.
+		if t.tail > 0 {
+			t.resetLogTail(false) // discard all logs.
+		}
 	}
 	return nil
 }
@@ -461,14 +465,17 @@ func (t *undoTx) Lock(m *sync.RWMutex) {
 }
 
 func (t *undoTx) unLock() {
-	for _, m := range t.wlocks {
+	for i, m := range t.wlocks {
 		m.Unlock()
+		t.wlocks[i] = nil
 	}
-	t.wlocks = make([]*sync.RWMutex, 0, 0)
-	for _, m := range t.rlocks {
+	t.wlocks = t.wlocks[:0]
+
+	for i, m := range t.rlocks {
 		m.RUnlock()
+		t.rlocks[i] = nil
 	}
-	t.rlocks = make([]*sync.RWMutex, 0, 0)
+	t.rlocks = t.rlocks[:0]
 }
 
 // The realloc parameter indicates if the backing array for the log entries
