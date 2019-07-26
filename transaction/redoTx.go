@@ -530,14 +530,16 @@ func (t *redoTx) Lock(m *sync.RWMutex) {
 }
 
 func (t *redoTx) unLock() {
-	for _, m := range t.wlocks {
+	for i, m := range t.wlocks {
 		m.Unlock()
+		t.wlocks[i] = nil
 	}
-	t.wlocks = make([]*sync.RWMutex, 0, 0)
-	for _, m := range t.rlocks {
+	t.wlocks = t.wlocks[:0]
+	for i, m := range t.rlocks {
 		m.RUnlock()
+		t.rlocks[i] = nil
 	}
-	t.rlocks = make([]*sync.RWMutex, 0, 0)
+	t.rlocks = t.rlocks[:0]
 }
 
 // Performs in-place updates of app data structures. Started again, if crashed
