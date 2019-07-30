@@ -24,6 +24,7 @@ type (
 	TX interface {
 		Begin() error
 		Log(...interface{}) error
+		Unlock()
 		ReadLog(...interface{}) interface{}
 		Exec(...interface{}) ([]reflect.Value, error)
 		End() error
