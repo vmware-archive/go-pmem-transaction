@@ -13,10 +13,10 @@ import (
 )
 
 const (
-	LBUFFERSIZE = 512 * 1024 // TODO: This could be a problem in the future
-	MAGIC       = 131071
-	LOGNUM      = 512
-	NUMENTRIES  = 128
+	MAXINT     = 1<<31 - 1
+	MAGIC      = 131071
+	LOGNUM     = 512
+	NUMENTRIES = 128
 )
 
 // transaction interface
