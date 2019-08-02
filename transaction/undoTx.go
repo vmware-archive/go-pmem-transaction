@@ -339,9 +339,11 @@ func (t *undoTx) logSlice(v1 reflect.Value) {
 	vshdr := (*sliceHeader)(vptr.ptr)
 	sourceVal := (*value)(unsafe.Pointer(&v1))
 	sshdr := (*sliceHeader)(sourceVal.ptr)
-	sourcePtr := (*[LBUFFERSIZE]byte)(sshdr.data)[:size:size]
-	destPtr := (*[LBUFFERSIZE]byte)(vshdr.data)[:size:size]
-	copy(destPtr, sourcePtr)
+	if size != 0 {
+		sourcePtr := (*[MAXINT]byte)(sshdr.data)[:size:size]
+		destPtr := (*[MAXINT]byte)(vshdr.data)[:size:size]
+		copy(destPtr, sourcePtr)
+	}
 	tail := t.tail
 	t.log[tail].ptr = unsafe.Pointer(v1.Pointer())  // point to original data
 	t.log[tail].data = unsafe.Pointer(v2.Pointer()) // point to logged copy
@@ -486,8 +488,8 @@ func (t *undoTx) abort(realloc bool) error {
 	// Replay undo logs. Order last updates first, during abort
 	t.level = 0
 	for i := t.tail - 1; i >= 0; i-- {
-		origDataPtr := (*[LBUFFERSIZE]byte)(t.log[i].ptr)
-		logDataPtr := (*[LBUFFERSIZE]byte)(t.log[i].data)
+		origDataPtr := (*[MAXINT]byte)(t.log[i].ptr)
+		logDataPtr := (*[MAXINT]byte)(t.log[i].data)
 		original := origDataPtr[:t.log[i].size:t.log[i].size]
 		logdata := logDataPtr[:t.log[i].size:t.log[i].size]
 		copy(original, logdata)
