@@ -106,9 +106,9 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 		}
 
 		// Recover data from previous pending transactions, if any
-		var tx *undoTx
 		for i := 0; i < LOGNUM; i++ {
-			tx = txHeaderPtr.logPtr[i]
+			tx := txHeaderPtr.logPtr[i]
+			tx.level = 0
 			tx.index = i
 			tx.wlocks = make([]*sync.RWMutex, 0, 0) // Resetting volatile locks
 			tx.rlocks = make([]*sync.RWMutex, 0, 0) // before checking for data
@@ -143,6 +143,7 @@ func NewUndoTx() TX {
 func releaseUndoTx(t *undoTx) {
 	// Reset the pointers in the log entries, but need not allocate a new
 	// backing array
+	t.level = 0
 	if t.tail > 0 {
 		t.abort(false)
 	}
@@ -486,7 +487,6 @@ func (t *undoTx) Unlock() {
 func (t *undoTx) abort(realloc bool) error {
 	defer t.Unlock()
 	// Replay undo logs. Order last updates first, during abort
-	t.level = 0
 	for i := t.tail - 1; i >= 0; i-- {
 		origDataPtr := (*[MAXINT]byte)(t.log[i].ptr)
 		logDataPtr := (*[MAXINT]byte)(t.log[i].data)
