@@ -6,8 +6,9 @@
 package txtest
 
 import (
-	"github.com/vmware/go-pmem-transaction/pmem"
 	"os"
+
+	"github.com/vmware/go-pmem-transaction/pmem"
 )
 
 func init() {

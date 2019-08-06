@@ -8,11 +8,12 @@ package txtest
 import (
 	"errors"
 	"fmt"
-	"github.com/vmware/go-pmem-transaction/transaction"
 	"runtime"
 	"sync"
 	"testing"
 	"unsafe"
+
+	"github.com/vmware/go-pmem-transaction/transaction"
 )
 
 type structLogTest struct {
