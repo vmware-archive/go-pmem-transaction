@@ -108,7 +108,6 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 		// Recover data from previous pending transactions, if any
 		for i := 0; i < LOGNUM; i++ {
 			tx := txHeaderPtr.logPtr[i]
-			tx.level = 0
 			tx.index = i
 			tx.wlocks = make([]*sync.RWMutex, 0, 0) // Resetting volatile locks
 			tx.rlocks = make([]*sync.RWMutex, 0, 0) // before checking for data
@@ -143,14 +142,12 @@ func NewUndoTx() TX {
 func releaseUndoTx(t *undoTx) {
 	// Reset the pointers in the log entries, but need not allocate a new
 	// backing array
-	t.level = 0
-	if t.tail > 0 {
-		t.abort(false)
-	}
+	t.abort(false)
 	undoArray.clearBit(t.index)
 }
 
 func (t *undoTx) setTail(tail int) {
+	runtime.Fence()
 	t.tail = tail
 	runtime.PersistRange(unsafe.Pointer(&t.tail), unsafe.Sizeof(t.tail))
 }
@@ -159,8 +156,7 @@ func (t *undoTx) setTail(tail int) {
 // need to be reallocated.
 func (t *undoTx) resetLogTail(realloc bool) {
 	tail := t.tail
-	runtime.Fence()
-	if t.tail != 0 {
+	if tail != 0 {
 		t.setTail(0)
 	}
 
@@ -177,7 +173,9 @@ func (t *undoTx) resetLogTail(realloc bool) {
 			t.log[i].data = nil
 			runtime.FlushRange(unsafe.Pointer(&t.log[i].ptr), 2*unsafe.Sizeof(t.log[i].ptr))
 		}
-		runtime.Fence()
+		// Fence can be avoided here because when we log a new entry, we will
+		// call a store fence before updating the value of tail. And if we crash
+		// at this point, a new log array will be allocated in the restart path.
 	}
 }
 
@@ -191,11 +189,10 @@ func (t *undoTx) increaseLogTail() {
 		runtime.PersistRange(unsafe.Pointer(&newLog[0]),
 			uintptr(newE)*unsafe.Sizeof(newLog[0])) // Persist new log
 		t.log = newLog
-		// flush, as there is a fence immediately after this
+		// There is a fence immediately after this in setTail()
 		runtime.FlushRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
 	}
 	// common case
-	runtime.Fence() // Required as Log() does not issue any store fence
 	t.setTail(tail)
 }
 
@@ -446,9 +443,7 @@ func (t *undoTx) End() error {
 				t.log[i].sliceElemSize = 0 // reset
 			}
 		}
-		if t.tail > 0 {
-			t.resetLogTail(false) // discard all logs.
-		}
+		t.resetLogTail(false) // discard all logs.
 	}
 	return nil
 }
@@ -487,6 +482,7 @@ func (t *undoTx) Unlock() {
 func (t *undoTx) abort(realloc bool) error {
 	defer t.Unlock()
 	// Replay undo logs. Order last updates first, during abort
+	t.level = 0
 	for i := t.tail - 1; i >= 0; i-- {
 		origDataPtr := (*[MAXINT]byte)(t.log[i].ptr)
 		logDataPtr := (*[MAXINT]byte)(t.log[i].data)
