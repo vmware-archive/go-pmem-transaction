@@ -8,10 +8,11 @@ package txtest
 import (
 	"errors"
 	"fmt"
-	"github.com/vmware/go-pmem-transaction/transaction"
 	"reflect"
 	"runtime/debug"
 	"testing"
+
+	"github.com/vmware/go-pmem-transaction/transaction"
 )
 
 type basic struct {
