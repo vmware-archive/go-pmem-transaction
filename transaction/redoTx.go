@@ -358,6 +358,11 @@ func (t *redoTx) Log(intf ...interface{}) (err error) {
 	return err
 }
 
+func (t *redoTx) LogB(addr unsafe.Pointer) error {
+	log.Fatal("Not implemented")
+	return nil
+}
+
 func (t *redoTx) writeLogEntry(ptr uintptr, data reflect.Value,
 	typ reflect.Type) error {
 	size := int(typ.Size())

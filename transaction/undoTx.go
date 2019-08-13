@@ -51,16 +51,27 @@ import (
 
 type (
 	undoTx struct {
+		// log is the backing array for Log()
 		log []entry
 
-		// stores the tail position of the log where new data would be stored
+		// logB is the backing array for LogB()
+		logB []byte
+
+		// The position at which logged data will be stored at in log array
 		tail int
+
+		// The position at which logged data will be stored in logB array
+		tailB int
 
 		// Level of nesting. Needed for nested transactions
 		level int
 
 		// Index of the log handle within undoArray
 		index int
+
+		// Since we maintain two log arrays, the flushed boolean variable is
+		// used to indicate that data flushing on both arrays has completed.
+		flushed bool
 
 		rlocks []*sync.RWMutex
 		wlocks []*sync.RWMutex
@@ -75,6 +86,17 @@ type (
 var (
 	txHeaderPtr *undoTxHeader
 	undoArray   *bitmap
+)
+
+const (
+	// Size required to log each data item in the byte log array
+	logBEntrySize = 24
+
+	// The following constants indicate the offset values of tail, address, and
+	// data entries stored in each entry in the LogB buffer.
+	tailOff = 0
+	addrOff = 8
+	dataOff = 16
 )
 
 /* Does the first time initialization, else restores log structure and
@@ -122,6 +144,8 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 func _initUndoTx(size, index int) *undoTx {
 	tx := pnew(undoTx)
 	tx.log = pmake([]entry, size)
+	// Start with 1KB size. Size is doubled in case log runs out of space.
+	tx.logB = pmake([]byte, 1024)
 	runtime.PersistRange(unsafe.Pointer(&tx.log), unsafe.Sizeof(tx.log))
 	tx.wlocks = make([]*sync.RWMutex, 0, 0)
 	tx.rlocks = make([]*sync.RWMutex, 0, 0)
@@ -145,9 +169,19 @@ func releaseUndoTx(t *undoTx) {
 }
 
 func (t *undoTx) setTail(tail int) {
-	runtime.Fence()
 	t.tail = tail
 	runtime.PersistRange(unsafe.Pointer(&t.tail), ptrSize)
+}
+
+func (t *undoTx) setTailB(tail int) {
+	t.tailB = tail
+	runtime.PersistRange(unsafe.Pointer(&t.tailB), ptrSize)
+}
+
+func (t *undoTx) setFlushed(flushed bool) {
+	runtime.Fence()
+	t.flushed = flushed
+	runtime.PersistRange(unsafe.Pointer(&t.flushed), ptrSize)
 }
 
 // The realloc parameter indicates if the backing array for the log entries
@@ -158,9 +192,12 @@ func (t *undoTx) resetLogTail(realloc bool) {
 		t.setTail(0)
 	}
 
+	if t.tailB != 0 {
+		t.setTailB(0)
+	}
+
 	if realloc {
-		// Allocate a new backing array if realloc is true or if the array was
-		// expanded to accommodate more log entries.
+		// Allocate a new backing array for the log array if realloc is true
 		t.log = pmake([]entry, NumEntries)
 		runtime.PersistRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
 	} else {
@@ -185,10 +222,9 @@ func (t *undoTx) increaseLogTail() {
 		newLog := pmake([]entry, newE)
 		copy(newLog, t.log)
 		runtime.PersistRange(unsafe.Pointer(&newLog[0]),
-			uintptr(newE)*unsafe.Sizeof(newLog[0])) // Persist new log
+			uintptr(cap(t.log))*unsafe.Sizeof(newLog[0])) // Persist new log
 		t.log = newLog
-		// There is a fence immediately after this in setTail()
-		runtime.FlushRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
+		runtime.PersistRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
 	}
 	// common case
 	t.setTail(tail)
@@ -278,7 +314,7 @@ func (t *undoTx) Log(intf ...interface{}) error {
 
 		// Flush logged data copy and entry.
 		runtime.FlushRange(t.log[tail].data, uintptr(size))
-		runtime.FlushRange(unsafe.Pointer(&t.log[tail]),
+		runtime.PersistRange(unsafe.Pointer(&t.log[tail]),
 			unsafe.Sizeof(t.log[tail]))
 
 		// Update log offset in header.
@@ -352,6 +388,48 @@ func (t *undoTx) logSlice(v1 reflect.Value) {
 
 	// Update log offset in header.
 	t.increaseLogTail()
+}
+
+// LogB is an optimized logging function that is used to log 8 byte of data at a
+// time. The input to LogB is the address of the data item to be logged.
+// Since a byte array is used to store the log entries, the garbage
+// collector will not follow any pointer links stored in the log entries.
+// 24 bytes is used for storing each data entry. The layout is:
+// tail (8 bytes), address (8 bytes), old data (8 bytes). The value of tail is
+// stored to order data updates while reverting the transaction.
+func (t *undoTx) LogB(addr unsafe.Pointer) error {
+	if !runtime.InPmem(uintptr(addr)) {
+		return errors.New("[undoTx] Log: Can't log data in volatile memory")
+	}
+
+	// The offset at which this data entry has to be written at in the array
+	entryOff := t.tailB * logBEntrySize
+
+	// Check if we have enough space to store this entry
+	if entryOff+logBEntrySize > cap(t.logB) {
+		oldSize := t.tailB * logBEntrySize
+		logB := pmake([]byte, 2*cap(t.logB))
+		copy(logB, t.logB[:oldSize])
+		runtime.PersistRange(unsafe.Pointer(&logB[0]), uintptr(oldSize))
+		t.logB = logB
+		runtime.PersistRange(unsafe.Pointer(&t.logB), unsafe.Sizeof(t.logB))
+	}
+
+	// Value of tail is used for ordering updates in the undo log
+	tailPtr := (*[8]byte)(unsafe.Pointer(&t.tail))
+	copy(t.logB[entryOff+tailOff:], tailPtr[:])
+
+	// Store the address of the logged data
+	addrPtr := (*[8]byte)(unsafe.Pointer(&addr))
+	copy(t.logB[entryOff+addrOff:], addrPtr[:])
+
+	// Store the actual data
+	dataPtr := (*[8]byte)(unsafe.Pointer(addr))
+	copy(t.logB[entryOff+dataOff:], dataPtr[:])
+
+	runtime.PersistRange(unsafe.Pointer(&t.logB[entryOff]), logBEntrySize)
+	t.setTailB(t.tailB + 1)
+	return nil
 }
 
 /* Exec function receives a variable number of interfaces as its arguments.
@@ -430,7 +508,7 @@ func (t *undoTx) End() error {
 		defer t.Unlock()
 
 		// Need to flush current value of logged areas
-		for i := t.tail - 1; i >= 0; i-- {
+		for i := 0; i < t.tail; i++ {
 			runtime.FlushRange(t.log[i].ptr, uintptr(t.log[i].size))
 			if t.log[i].sliceElemSize != 0 {
 				// ptr points to sliceHeader. So, need to persist the slice too
@@ -441,7 +519,21 @@ func (t *undoTx) End() error {
 				t.log[i].sliceElemSize = 0 // reset
 			}
 		}
+		for i := 0; i < t.tailB; i++ {
+			entryOff := i * logBEntrySize
+			addrPtr := (*uintptr)(unsafe.Pointer(&t.logB[entryOff+addrOff]))
+			addr := unsafe.Pointer(*addrPtr)
+			runtime.FlushRange(addr, ptrSize)
+		}
+
+		if t.tail == 0 && t.tailB == 0 {
+			// nothing to do
+			return nil
+		}
+
+		t.setFlushed(true)
 		t.resetLogTail(false) // discard all logs.
+		t.setFlushed(false)
 	}
 	return nil
 }
@@ -475,20 +567,61 @@ func (t *undoTx) Unlock() {
 	t.rlocks = t.rlocks[:0]
 }
 
+// Revert log entry at ith position in log array
+func (t *undoTx) revertLogEntry(i int) {
+	size := t.log[i].size
+	origData := (*[maxint]byte)(t.log[i].ptr)
+	logData := (*[maxint]byte)(t.log[i].data)
+	copy(origData[:size], logData[:size])
+	runtime.FlushRange(t.log[i].ptr, uintptr(size))
+}
+
+// Revert log entry at ith position in logB array
+func (t *undoTx) revertLogBEntry(i int) {
+	entryOff := i * logBEntrySize
+	origDataPtr := (*uintptr)(unsafe.Pointer(&t.logB[entryOff+addrOff]))
+	origData := (*[maxint]byte)(unsafe.Pointer(*origDataPtr))
+	logData := (*[maxint]byte)(unsafe.Pointer(&t.logB[entryOff+dataOff]))
+	copy(origData[:ptrSize], logData[:ptrSize])
+	runtime.FlushRange(unsafe.Pointer(origData), ptrSize)
+}
+
+// This function takes care of iterating both log arrays and reverting data
+// updates in the correct order.
+func (t *undoTx) revertAllLogs() {
+	ind := t.tail - 1
+
+	for indB := t.tailB - 1; indB >= 0; indB-- {
+		entryOff := indB * logBEntrySize
+		tailPtr := (*int)(unsafe.Pointer(&t.logB[entryOff+tailOff]))
+		// Revert entries in Log array until the value of tail stored in this
+		// entry is less than `ind`
+		for ind >= *tailPtr {
+			t.revertLogEntry(ind)
+			ind--
+		}
+		t.revertLogBEntry(indB)
+	}
+
+	// Revert any remaining log entries in the Log array
+	for ; ind >= 0; ind-- {
+		t.revertLogEntry(ind)
+	}
+}
+
 // The realloc parameter indicates if the backing array for the log entries
 // need to be reallocated.
 func (t *undoTx) abort(realloc bool) error {
 	defer t.Unlock()
 	// Replay undo logs. Order last updates first, during abort
 	t.level = 0
-	for i := t.tail - 1; i >= 0; i-- {
-		origDataPtr := (*[maxint]byte)(t.log[i].ptr)
-		logDataPtr := (*[maxint]byte)(t.log[i].data)
-		original := origDataPtr[:t.log[i].size:t.log[i].size]
-		logdata := logDataPtr[:t.log[i].size:t.log[i].size]
-		copy(original, logdata)
-		runtime.FlushRange(t.log[i].ptr, uintptr(t.log[i].size))
+
+	if t.flushed == false {
+		t.revertAllLogs()
+		t.setFlushed(true)
 	}
+
 	t.resetLogTail(realloc)
+	t.setFlushed(false)
 	return nil
 }

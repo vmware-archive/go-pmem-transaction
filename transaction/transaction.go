@@ -14,10 +14,10 @@ import (
 
 const (
 	maxint     = 1<<31 - 1
-	magic       = 131071
-	logNum      = 512
-	NumEntries  = 128
-	ptrSize     = 8 // Size of an integer or pointer value in Go
+	magic      = 131071
+	logNum     = 512
+	NumEntries = 128
+	ptrSize    = 8 // Size of an integer or pointer value in Go
 )
 
 // transaction interface
@@ -25,6 +25,7 @@ type (
 	TX interface {
 		Begin() error
 		Log(...interface{}) error
+		LogB(ptr unsafe.Pointer) error
 		Unlock()
 		ReadLog(...interface{}) interface{}
 		Exec(...interface{}) ([]reflect.Value, error)
