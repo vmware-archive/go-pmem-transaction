@@ -68,7 +68,7 @@ type (
 
 	undoTxHeader struct {
 		magic  int
-		logPtr [LOGNUM]*undoTx
+		logPtr [logNum]*undoTx
 	}
 )
 
@@ -83,30 +83,28 @@ var (
  * so the application can store it in its pmem appRoot.
  */
 func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
-	undoArray = newBitmap(LOGNUM)
+	undoArray = newBitmap(logNum)
 	if logHeadPtr == nil {
 		// First time initialization
 		txHeaderPtr = pnew(undoTxHeader)
-		for i := 0; i < LOGNUM; i++ {
-			txHeaderPtr.logPtr[i] = _initUndoTx(NUMENTRIES, i)
+		for i := 0; i < logNum; i++ {
+			txHeaderPtr.logPtr[i] = _initUndoTx(NumEntries, i)
 		}
 		// Write the magic constant after the transaction handles are persisted.
 		// NewUndoTx() can then check this constant to ensure all tx handles
 		// are properly initialized before releasing any.
-		runtime.PersistRange(unsafe.Pointer(&txHeaderPtr.logPtr),
-			unsafe.Sizeof(txHeaderPtr.logPtr))
-		txHeaderPtr.magic = MAGIC
-		runtime.PersistRange(unsafe.Pointer(&txHeaderPtr.magic),
-			unsafe.Sizeof(txHeaderPtr.magic))
+		runtime.PersistRange(unsafe.Pointer(&txHeaderPtr.logPtr), logNum*ptrSize)
+		txHeaderPtr.magic = magic
+		runtime.PersistRange(unsafe.Pointer(&txHeaderPtr.magic), ptrSize)
 		logHeadPtr = unsafe.Pointer(txHeaderPtr)
 	} else {
 		txHeaderPtr = (*undoTxHeader)(logHeadPtr)
-		if txHeaderPtr.magic != MAGIC {
+		if txHeaderPtr.magic != magic {
 			log.Fatal("undoTxHeader magic does not match!")
 		}
 
 		// Recover data from previous pending transactions, if any
-		for i := 0; i < LOGNUM; i++ {
+		for i := 0; i < logNum; i++ {
 			tx := txHeaderPtr.logPtr[i]
 			tx.index = i
 			tx.wlocks = make([]*sync.RWMutex, 0, 0) // Resetting volatile locks
@@ -132,7 +130,7 @@ func _initUndoTx(size, index int) *undoTx {
 }
 
 func NewUndoTx() TX {
-	if txHeaderPtr == nil || txHeaderPtr.magic != MAGIC {
+	if txHeaderPtr == nil || txHeaderPtr.magic != magic {
 		log.Fatal("Undo log not correctly initialized!")
 	}
 	index := undoArray.nextAvailable()
@@ -149,7 +147,7 @@ func releaseUndoTx(t *undoTx) {
 func (t *undoTx) setTail(tail int) {
 	runtime.Fence()
 	t.tail = tail
-	runtime.PersistRange(unsafe.Pointer(&t.tail), unsafe.Sizeof(t.tail))
+	runtime.PersistRange(unsafe.Pointer(&t.tail), ptrSize)
 }
 
 // The realloc parameter indicates if the backing array for the log entries
@@ -163,7 +161,7 @@ func (t *undoTx) resetLogTail(realloc bool) {
 	if realloc {
 		// Allocate a new backing array if realloc is true or if the array was
 		// expanded to accommodate more log entries.
-		t.log = pmake([]entry, NUMENTRIES)
+		t.log = pmake([]entry, NumEntries)
 		runtime.PersistRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
 	} else {
 		// Zero out the pointers in the log entries so that the data pointed by
@@ -171,7 +169,7 @@ func (t *undoTx) resetLogTail(realloc bool) {
 		for i := 0; i < tail; i++ {
 			t.log[i].ptr = nil
 			t.log[i].data = nil
-			runtime.FlushRange(unsafe.Pointer(&t.log[i].ptr), 2*unsafe.Sizeof(t.log[i].ptr))
+			runtime.FlushRange(unsafe.Pointer(&t.log[i].ptr), 2*ptrSize)
 		}
 		// Fence can be avoided here because when we log a new entry, we will
 		// call a store fence before updating the value of tail. And if we crash
@@ -338,8 +336,8 @@ func (t *undoTx) logSlice(v1 reflect.Value) {
 	sourceVal := (*value)(unsafe.Pointer(&v1))
 	sshdr := (*sliceHeader)(sourceVal.ptr)
 	if size != 0 {
-		sourcePtr := (*[MAXINT]byte)(sshdr.data)[:size:size]
-		destPtr := (*[MAXINT]byte)(vshdr.data)[:size:size]
+		sourcePtr := (*[maxint]byte)(sshdr.data)[:size:size]
+		destPtr := (*[maxint]byte)(vshdr.data)[:size:size]
 		copy(destPtr, sourcePtr)
 	}
 	tail := t.tail
@@ -484,8 +482,8 @@ func (t *undoTx) abort(realloc bool) error {
 	// Replay undo logs. Order last updates first, during abort
 	t.level = 0
 	for i := t.tail - 1; i >= 0; i-- {
-		origDataPtr := (*[MAXINT]byte)(t.log[i].ptr)
-		logDataPtr := (*[MAXINT]byte)(t.log[i].data)
+		origDataPtr := (*[maxint]byte)(t.log[i].ptr)
+		logDataPtr := (*[maxint]byte)(t.log[i].data)
 		original := origDataPtr[:t.log[i].size:t.log[i].size]
 		logdata := logDataPtr[:t.log[i].size:t.log[i].size]
 		copy(original, logdata)

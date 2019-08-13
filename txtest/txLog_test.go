@@ -464,7 +464,7 @@ func testReadLog(t *testing.T, txType string) {
 func TestUndoLogExpand(t *testing.T) {
 	fmt.Println("Testing undo log expansion commit by logging more entries")
 	undoTx := transaction.NewUndoTx()
-	sizeToCheck := transaction.NUMENTRIES*4 + 1
+	sizeToCheck := transaction.NumEntries*4 + 1
 	slice1 = pmake([]int, sizeToCheck)
 	undoTx.Begin()
 	for i := 0; i < sizeToCheck; i++ {
@@ -479,7 +479,7 @@ func TestUndoLogExpand(t *testing.T) {
 
 	fmt.Println("Testing undo log expansion abort")
 	slice1 = pmake([]int, sizeToCheck)
-	sizeToAbort := transaction.NUMENTRIES*2 + 1
+	sizeToAbort := transaction.NumEntries*2 + 1
 	undoTx = transaction.NewUndoTx()
 	undoTx.Begin()
 	for i := 0; i < sizeToCheck; i++ {
@@ -498,7 +498,7 @@ func TestUndoLogExpand(t *testing.T) {
 func TestRedoLogExpand(t *testing.T) {
 	fmt.Println("Testing redo log expansion commit by logging more entries")
 	redoTx := transaction.NewRedoTx()
-	sizeToCheck := transaction.NUMENTRIES*4 + 1
+	sizeToCheck := transaction.NumEntries*4 + 1
 	slice1 = pmake([]int, sizeToCheck)
 	redoTx.Begin()
 	for i := 0; i < sizeToCheck; i++ {
@@ -512,7 +512,7 @@ func TestRedoLogExpand(t *testing.T) {
 
 	fmt.Println("Testing redo log expansion abort")
 	slice1 = pmake([]int, sizeToCheck)
-	sizeToAbort := transaction.NUMENTRIES*2 + 1
+	sizeToAbort := transaction.NumEntries*2 + 1
 	redoTx = transaction.NewRedoTx()
 	redoTx.Begin()
 	for i := 0; i < sizeToCheck; i++ {
