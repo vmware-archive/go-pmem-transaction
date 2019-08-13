@@ -72,7 +72,7 @@ type (
 
 	redoTxHeader struct {
 		magic  int
-		logPtr [LOGNUM]*redoTx
+		logPtr [logNum]*redoTx
 	}
 )
 
@@ -86,32 +86,30 @@ var (
  * so the application can store this in its pmem appRoot.
  */
 func initRedoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
-	redoArray = newBitmap(LOGNUM)
+	redoArray = newBitmap(logNum)
 	if logHeadPtr == nil {
 		// First time initialization
 		headerPtr = pnew(redoTxHeader)
-		for i := 0; i < LOGNUM; i++ {
-			headerPtr.logPtr[i] = _initRedoTx(NUMENTRIES, i)
+		for i := 0; i < logNum; i++ {
+			headerPtr.logPtr[i] = _initRedoTx(NumEntries, i)
 		}
 		// Write the magic constant after the transaction handles are persisted.
 		// NewRedoTx() can then check this constant to ensure all tx handles
 		// are properly initialized before releasing any.
-		runtime.PersistRange(unsafe.Pointer(&headerPtr.logPtr),
-			unsafe.Sizeof(headerPtr.logPtr))
-		headerPtr.magic = MAGIC
-		runtime.PersistRange(unsafe.Pointer(&headerPtr.magic),
-			unsafe.Sizeof(headerPtr.magic))
+		runtime.PersistRange(unsafe.Pointer(&headerPtr.logPtr), logNum*ptrSize)
+		headerPtr.magic = magic
+		runtime.PersistRange(unsafe.Pointer(&headerPtr.magic), ptrSize)
 		logHeadPtr = unsafe.Pointer(headerPtr)
 	} else {
 		headerPtr = (*redoTxHeader)(logHeadPtr)
-		if headerPtr.magic != MAGIC {
+		if headerPtr.magic != magic {
 			log.Fatal("redoTxHeader magic does not match!")
 		}
 
 		// Depending on committed status of transactions, flush changes to
 		// data structures or delete all log entries.
 		var tx *redoTx
-		for i := 0; i < LOGNUM; i++ {
+		for i := 0; i < logNum; i++ {
 			tx = headerPtr.logPtr[i]
 			tx.index = i
 			tx.wlocks = make([]*sync.RWMutex, 0, 0) // Resetting volatile locks
@@ -140,7 +138,7 @@ func _initRedoTx(size, index int) *redoTx {
 }
 
 func NewRedoTx() TX {
-	if headerPtr == nil || headerPtr.magic != MAGIC {
+	if headerPtr == nil || headerPtr.magic != magic {
 		log.Fatal("redo log not correctly initialized!")
 	}
 	index := redoArray.nextAvailable()
@@ -547,13 +545,13 @@ func (t *redoTx) Unlock() {
 // in between
 func (t *redoTx) commit(skipVolData bool) error {
 	for i := t.tail - 1; i >= 0; i-- {
-		oldDataPtr := (*[MAXINT]byte)(t.log[i].ptr)
+		oldDataPtr := (*[maxint]byte)(t.log[i].ptr)
 		if skipVolData && !runtime.InPmem(uintptr(unsafe.Pointer(oldDataPtr))) {
 			// If commit() was called during Init, control reaches here. If so,
 			// we drop updates to data in volatile memory
 			continue
 		}
-		logDataPtr := (*[MAXINT]byte)(t.log[i].data)
+		logDataPtr := (*[maxint]byte)(t.log[i].data)
 		oldData := oldDataPtr[:t.log[i].size:t.log[i].size]
 		logData := logDataPtr[:t.log[i].size:t.log[i].size]
 		copy(oldData, logData)
@@ -583,10 +581,10 @@ func (t *redoTx) reset(sz int) {
 	defer t.Unlock()
 	t.level = 0
 	t.m = make(map[unsafe.Pointer]int)
-	t.log = t.log[:NUMENTRIES] // reset to original size
-	t.nEntry = NUMENTRIES
-	if sz > NUMENTRIES {
-		sz = NUMENTRIES
+	t.log = t.log[:NumEntries] // reset to original size
+	t.nEntry = NumEntries
+	if sz > NumEntries {
+		sz = NumEntries
 	}
 	for i := sz - 1; i >= 0; i-- {
 		t.log[i].ptr = nil
