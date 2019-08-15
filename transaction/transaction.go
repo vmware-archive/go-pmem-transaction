@@ -13,11 +13,11 @@ import (
 )
 
 const (
-	maxint     = 1<<31 - 1
-	magic       = 131071
-	logNum      = 512
-	NumEntries  = 128
-	ptrSize     = 8 // Size of an integer or pointer value in Go
+	maxInt     = 1<<31 - 1
+	magic      = 131071
+	logNum     = 512
+	NumEntries = 128
+	ptrSize    = 8 // Size of an integer or pointer value in Go
 )
 
 // transaction interface
