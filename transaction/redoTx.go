@@ -545,13 +545,13 @@ func (t *redoTx) Unlock() {
 // in between
 func (t *redoTx) commit(skipVolData bool) error {
 	for i := t.tail - 1; i >= 0; i-- {
-		oldDataPtr := (*[maxint]byte)(t.log[i].ptr)
+		oldDataPtr := (*[maxInt]byte)(t.log[i].ptr)
 		if skipVolData && !runtime.InPmem(uintptr(unsafe.Pointer(oldDataPtr))) {
 			// If commit() was called during Init, control reaches here. If so,
 			// we drop updates to data in volatile memory
 			continue
 		}
-		logDataPtr := (*[maxint]byte)(t.log[i].data)
+		logDataPtr := (*[maxInt]byte)(t.log[i].data)
 		oldData := oldDataPtr[:t.log[i].size:t.log[i].size]
 		logData := logDataPtr[:t.log[i].size:t.log[i].size]
 		copy(oldData, logData)
