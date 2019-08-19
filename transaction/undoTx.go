@@ -327,6 +327,9 @@ func updateVar(ptr, data reflect.Value) {
 }
 
 func (t *undoTx) logSlice(v1 reflect.Value) {
+	if !v1.IsValid() {
+		return
+	}
 	typ := v1.Type()
 	v1len := v1.Len()
 	size := v1len * int(typ.Elem().Size())
