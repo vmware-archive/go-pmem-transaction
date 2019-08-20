@@ -527,8 +527,7 @@ func (t *redoTx) Lock(m *sync.RWMutex) {
 	t.WLock(m)
 }
 
-// Unlock API unlock all the read and write locks taken so far
-func (t *redoTx) Unlock() {
+func (t *redoTx) unLock() {
 	for i, m := range t.wlocks {
 		m.Unlock()
 		t.wlocks[i] = nil
@@ -578,7 +577,7 @@ func (t *redoTx) abort() error {
 
 // Resets the entries from sz-1 to 0 in the log
 func (t *redoTx) reset(sz int) {
-	defer t.Unlock()
+	defer t.unLock()
 	t.level = 0
 	t.m = make(map[unsafe.Pointer]int)
 	t.log = t.log[:NumEntries] // reset to original size

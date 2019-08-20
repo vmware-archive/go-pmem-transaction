@@ -427,7 +427,7 @@ func (t *undoTx) End() error {
 	}
 	t.level--
 	if t.level == 0 {
-		defer t.Unlock()
+		defer t.unLock()
 
 		// Need to flush current value of logged areas
 		for i := t.tail - 1; i >= 0; i-- {
@@ -460,8 +460,7 @@ func (t *undoTx) Lock(m *sync.RWMutex) {
 	t.WLock(m)
 }
 
-// Unlock API unlocks all the read and write locks taken so far
-func (t *undoTx) Unlock() {
+func (t *undoTx) unLock() {
 	for i, m := range t.wlocks {
 		m.Unlock()
 		t.wlocks[i] = nil
@@ -478,7 +477,7 @@ func (t *undoTx) Unlock() {
 // The realloc parameter indicates if the backing array for the log entries
 // need to be reallocated.
 func (t *undoTx) abort(realloc bool) error {
-	defer t.Unlock()
+	defer t.unLock()
 	// Replay undo logs. Order last updates first, during abort
 	t.level = 0
 	for i := t.tail - 1; i >= 0; i-- {
