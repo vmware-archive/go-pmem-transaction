@@ -442,8 +442,9 @@ func (t *undoTx) End() error {
 			}
 		}
 		t.resetLogTail(false) // discard all logs.
+		return nil
 	}
-	return nil
+	return errors.New("[undoTx] End: Inner transaction. Nothing to do")
 }
 
 func (t *undoTx) RLock(m *sync.RWMutex) {

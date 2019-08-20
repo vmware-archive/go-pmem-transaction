@@ -405,6 +405,19 @@ func TestUndoLogBasic(t *testing.T) {
 	transaction.Release(undoTx)
 	assertEqual(t, struct2.slice[2], slice2[2])
 	assertEqual(t, len(struct2.slice), len(slice2))
+
+	fmt.Println("Testing nil error return when outer transaction ends",
+		"& non-nil error return when inner transaction ends")
+	errInnerTx := errors.New("[undoTx] End: Inner transaction. Nothing to do")
+	undoTx = transaction.NewUndoTx()
+	undoTx.Begin()
+	undoTx.Begin()
+	err = undoTx.End()
+	assertEqual(t, err.Error(), errInnerTx.Error())
+	err = undoTx.End()
+	if err != nil {
+		assertEqual(t, 0, 1)
+	}
 }
 
 func TestReadLog(t *testing.T) {
