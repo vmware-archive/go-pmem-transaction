@@ -42,7 +42,7 @@ func TestAPIs(t *testing.T) {
 	tx.End() // since update is within log, no need to call persistRange
 	assertEqual(t, *a, 10)
 	var b *int
-	b = (*int)(pmem.Get("region1", b))
+	b = (*int)(pmem.New("region1", b))
 	assertEqual(t, *b, 10)
 
 	// named Make for slice of integers
@@ -54,7 +54,7 @@ func TestAPIs(t *testing.T) {
 	slice1[0] = 1.1
 	tx.End()
 	var slice2 []float64
-	slice2 = pmem.GetSlice("region2", slice2, 10).([]float64) // Get same slice
+	slice2 = pmem.Make("region2", slice2, 10).([]float64) // Get same slice
 	assertEqual(t, slice2[0], 1.1)
 	assertEqual(t, len(slice2), 10)
 
@@ -72,7 +72,7 @@ func TestAPIs(t *testing.T) {
 	st1.slice[99] = 22
 	tx.End()
 	var st2 *structPmemTest
-	st2 = (*structPmemTest)(pmem.Get("region3", st2)) // Get back same struct
+	st2 = (*structPmemTest)(pmem.New("region3", st2)) // Get back same struct
 	assertEqual(t, st2.a, 20)
 	assertEqual(t, st2.b, true)
 	assertEqual(t, len(st2.slice), 100)
@@ -110,7 +110,7 @@ func TestAPIs(t *testing.T) {
 	assertEqual(t, st2.slice[0], st3.slice[0])
 	assertEqual(t, st2.slice[99], st3.slice[99])
 	var d *int
-	if pmem.Get("region4", st3) != nil {
+	if pmem.New("region4", st3) != nil {
 		if err := pmem.Delete("region4"); err != nil {
 			assert(t)
 		}
@@ -134,18 +134,18 @@ func TestAPIs(t *testing.T) {
 func TestCrashRetention(t *testing.T) {
 	fmt.Println("Getting region1 int")
 	var a *int
-	a = (*int)(pmem.Get("region1", a))
+	a = (*int)(pmem.New("region1", a))
 	assertEqual(t, *a, 10)
 
 	fmt.Println("Getting region2 []float64")
 	var s []float64
-	s = pmem.GetSlice("region2", s, 10).([]float64)
+	s = pmem.Make("region2", s, 10).([]float64)
 	assertEqual(t, s[0], 1.1)
 	assertEqual(t, len(s), 10)
 
 	fmt.Println("Getting region3 struct")
 	var st *structPmemTest
-	st = (*structPmemTest)(pmem.Get("region3", st))
+	st = (*structPmemTest)(pmem.New("region3", st))
 	assertEqual(t, st.a, 20)
 	assertEqual(t, st.b, true)
 	assertEqual(t, len(st.slice), 100)
@@ -154,7 +154,7 @@ func TestCrashRetention(t *testing.T) {
 
 	fmt.Println("Getting region4 which was updated to int")
 	var b *int
-	b = (*int)(pmem.Get("region4", b))
+	b = (*int)(pmem.New("region4", b))
 	assertEqual(t, *b, 1)
 }
 
@@ -162,14 +162,14 @@ func apiCrash1() {
 	var a *int
 	a = (*int)(pmem.New("region5", a))
 	var b *float64
-	b = (*float64)(pmem.Get("region5", b))
+	b = (*float64)(pmem.New("region5", b))
 }
 
 func apiCrash2() {
 	var a []int
 	a = pmem.Make("region6", a, 10).([]int)
 	var b []float64
-	b = pmem.GetSlice("region6", b).([]float64)
+	b = pmem.Make("region6", b).([]float64)
 }
 
 func apiCrash3() {
