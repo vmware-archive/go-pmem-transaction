@@ -258,7 +258,7 @@ func (t *undoTx) Log(intf ...interface{}) error {
 	}
 	switch v1.Kind() {
 	case reflect.Slice:
-		t.logSlice(v1)
+		t.logSlice(v1, true)
 	case reflect.Ptr:
 		tail := t.tail
 		oldv := reflect.Indirect(v1) // get the underlying data of pointer
@@ -285,7 +285,7 @@ func (t *undoTx) Log(intf ...interface{}) error {
 		t.increaseLogTail()
 		if oldv.Kind() == reflect.Slice {
 			// Pointer to slice was passed to Log(). So, log slice elements too
-			t.logSlice(oldv)
+			t.logSlice(oldv, false)
 		}
 	default:
 		debug.PrintStack()
@@ -326,7 +326,7 @@ func updateVar(ptr, data reflect.Value) {
 	*sshdr = *dshdr
 }
 
-func (t *undoTx) logSlice(v1 reflect.Value) {
+func (t *undoTx) logSlice(v1 reflect.Value, flushAtEnd bool) {
 	typ := v1.Type()
 	v1len := v1.Len()
 	size := v1len * int(typ.Elem().Size())
@@ -344,7 +344,14 @@ func (t *undoTx) logSlice(v1 reflect.Value) {
 	t.log[tail].ptr = unsafe.Pointer(v1.Pointer())  // point to original data
 	t.log[tail].data = unsafe.Pointer(v2.Pointer()) // point to logged copy
 	t.log[tail].size = size                         // size of data
-
+	if !flushAtEnd {
+		// This happens when ptr to sliceheader is logged. User can then update
+		// the sliceheader and the slice contents. So, when sliceheader is
+		// flushed in End(), new slice content also must be flushed in End().
+		// Set this to -1 to make sure that old slice contents are not flushed
+		// in End()
+		t.log[tail].sliceElemSize = -1
+	}
 	// Flush logged data copy and entry.
 	runtime.FlushRange(t.log[tail].data, uintptr(size))
 	runtime.FlushRange(unsafe.Pointer(&t.log[tail]),
@@ -431,10 +438,12 @@ func (t *undoTx) End() error {
 
 		// Need to flush current value of logged areas
 		for i := t.tail - 1; i >= 0; i-- {
-			runtime.FlushRange(t.log[i].ptr, uintptr(t.log[i].size))
-			if t.log[i].sliceElemSize != 0 {
-				// ptr points to sliceHeader. So, need to persist the slice too
-				// TODO: We can discard the original slice & skip in this loop
+			if t.log[i].sliceElemSize >= 0 {
+				runtime.FlushRange(t.log[i].ptr, uintptr(t.log[i].size))
+			}
+			if t.log[i].sliceElemSize > 0 {
+				// ptr points to sliceHeader. So, need to persist the slice
+				// contents too
 				shdr := (*sliceHeader)(t.log[i].ptr)
 				runtime.FlushRange(shdr.data, uintptr(shdr.len*
 					t.log[i].sliceElemSize))
