@@ -487,6 +487,11 @@ func (t *undoTx) abort(realloc bool) error {
 		logdata := logDataPtr[:t.log[i].size:t.log[i].size]
 		copy(original, logdata)
 		runtime.FlushRange(t.log[i].ptr, uintptr(t.log[i].size))
+		if t.log[i].sliceElemSize != 0 {
+			t.log[i].sliceElemSize = 0
+			runtime.FlushRange(unsafe.Pointer(&t.log[i].sliceElemSize),
+				unsafe.Sizeof(t.log[i].sliceElemSize))
+		}
 	}
 	t.resetLogTail(realloc)
 	return nil
