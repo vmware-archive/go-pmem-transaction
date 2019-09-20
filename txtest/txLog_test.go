@@ -415,6 +415,17 @@ func TestUndoLogBasic(t *testing.T) {
 	b = undoTx.End()
 	assertEqual(t, b, true)
 	transaction.Release(undoTx)
+
+	fmt.Println("Testing abort when nil slice is logged")
+	struct1 = pnew(structLogTest)
+	undoTx = transaction.NewUndoTx()
+	undoTx.Begin()
+	undoTx.Log(&struct1.slice)
+	struct1.slice = pmake([]int, 2)
+	transaction.Release(undoTx) // <-- abort
+	if struct1.slice != nil {
+		assertEqual(t, 0, 1) // Assert
+	}
 }
 
 func TestReadLog(t *testing.T) {
