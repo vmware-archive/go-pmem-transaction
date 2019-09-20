@@ -345,6 +345,10 @@ func updateVar(ptr, data reflect.Value) {
 }
 
 func (t *undoTx) logSlice(v1 reflect.Value, flushAtEnd bool) {
+	// Don't create log entries, if there is no slice, or slice is not in pmem
+	if v1.Pointer() == 0 || !runtime.InPmem(v1.Pointer()) {
+		return
+	}
 	typ := v1.Type()
 	v1len := v1.Len()
 	size := v1len * int(typ.Elem().Size())
