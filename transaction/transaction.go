@@ -37,10 +37,9 @@ type (
 	// ptr is the address of variable to be updated
 	// data points to old data copy for undo log & new data for redo log
 	entry struct {
-		ptr           unsafe.Pointer
-		data          unsafe.Pointer
-		size          int
-		sliceElemSize int // Non-zero value indicates ptr points to slice header
+		ptr  unsafe.Pointer
+		data unsafe.Pointer
+		size int
 	}
 )
 

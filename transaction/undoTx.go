@@ -50,6 +50,11 @@ import (
 )
 
 type (
+	pair struct {
+		first  int
+		second int
+	}
+
 	undoTx struct {
 		log []entry
 
@@ -64,6 +69,15 @@ type (
 
 		rlocks []*sync.RWMutex
 		wlocks []*sync.RWMutex
+
+		// record which log entries store sliceheader, and store the size of
+		// each element in that slice. This is only used when transaction ends
+		// successfully. So this structure is stored in volatile memory.
+		storeSliceHdr []pair
+
+		// list of log entries which need not be flushed during transaction's
+		// successful end. This structure is stored in volatile memory.
+		skipList []int
 	}
 
 	undoTxHeader struct {
@@ -109,6 +123,7 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 			tx.index = i
 			tx.wlocks = make([]*sync.RWMutex, 0, 0) // Resetting volatile locks
 			tx.rlocks = make([]*sync.RWMutex, 0, 0) // before checking for data
+			tx.resetVData()
 			// The value of tail is unreliable here as it might have been set
 			// as 0 during a previous recovery. Hence ask abort() to reallocate
 			// the array for the log entries.
@@ -125,6 +140,7 @@ func _initUndoTx(size, index int) *undoTx {
 	runtime.PersistRange(unsafe.Pointer(&tx.log), unsafe.Sizeof(tx.log))
 	tx.wlocks = make([]*sync.RWMutex, 0, 0)
 	tx.rlocks = make([]*sync.RWMutex, 0, 0)
+	tx.resetVData()
 	tx.index = index
 	return tx
 }
@@ -258,14 +274,15 @@ func (t *undoTx) Log(intf ...interface{}) error {
 	}
 	switch v1.Kind() {
 	case reflect.Slice:
-		t.logSlice(v1)
+		t.logSlice(v1, true)
 	case reflect.Ptr:
 		tail := t.tail
 		oldv := reflect.Indirect(v1) // get the underlying data of pointer
 		typ := oldv.Type()
 		if oldv.Kind() == reflect.Slice {
-			// store size of each slice element. Used later during t.End()
-			t.log[tail].sliceElemSize = int(typ.Elem().Size())
+			// record this log entry and store size of each slice element.
+			// Used later during End()
+			t.storeSliceHdr = append(t.storeSliceHdr, pair{tail, int(typ.Elem().Size())})
 		}
 		size := int(typ.Size())
 		v2 := reflect.PNew(oldv.Type())
@@ -284,8 +301,9 @@ func (t *undoTx) Log(intf ...interface{}) error {
 		// Update log offset in header.
 		t.increaseLogTail()
 		if oldv.Kind() == reflect.Slice {
-			// Pointer to slice was passed to Log(). So, log slice elements too
-			t.logSlice(oldv)
+			// Pointer to slice was passed to Log(). So, log slice elements too,
+			// but no need to flush these contents in End()
+			t.logSlice(oldv, false)
 		}
 	default:
 		debug.PrintStack()
@@ -326,7 +344,7 @@ func updateVar(ptr, data reflect.Value) {
 	*sshdr = *dshdr
 }
 
-func (t *undoTx) logSlice(v1 reflect.Value) {
+func (t *undoTx) logSlice(v1 reflect.Value, flushAtEnd bool) {
 	// Don't create log entries, if there is no slice, or slice is not in pmem
 	if v1.Pointer() == 0 || !runtime.InPmem(v1.Pointer()) {
 		return
@@ -348,6 +366,15 @@ func (t *undoTx) logSlice(v1 reflect.Value) {
 	t.log[tail].ptr = unsafe.Pointer(v1.Pointer())  // point to original data
 	t.log[tail].data = unsafe.Pointer(v2.Pointer()) // point to logged copy
 	t.log[tail].size = size                         // size of data
+
+	if !flushAtEnd {
+		// This happens when sliceheader is logged. User can then update
+		// the sliceheader and/or the slice contents. So, when sliceheader is
+		// flushed in End(), new slice contents also must be flushed in End().
+		// So this log entry containing old slice contents don't have to be
+		// flushed in End(). Add this to list of entries to be skipped.
+		t.skipList = append(t.skipList, tail)
+	}
 
 	// Flush logged data copy and entry.
 	runtime.FlushRange(t.log[tail].data, uintptr(size))
@@ -433,18 +460,27 @@ func (t *undoTx) End() error {
 	if t.level == 0 {
 		defer t.unLock()
 
+		var j, k int
 		// Need to flush current value of logged areas
-		for i := t.tail - 1; i >= 0; i-- {
+		for i := 0; i < t.tail; i++ {
+			// If entry recorded in skiplist, do nothing
+			if k < len(t.skipList) && t.skipList[k] == i {
+				k++
+				continue
+			}
+
 			runtime.FlushRange(t.log[i].ptr, uintptr(t.log[i].size))
-			if t.log[i].sliceElemSize != 0 {
+
+			if j < len(t.storeSliceHdr) && t.storeSliceHdr[j].first == i {
 				// ptr points to sliceHeader. So, need to persist the slice too
-				// TODO: We can discard the original slice & skip in this loop
+				// We also skip flushing the original slice
 				shdr := (*sliceHeader)(t.log[i].ptr)
 				runtime.FlushRange(shdr.data, uintptr(shdr.len*
-					t.log[i].sliceElemSize))
-				t.log[i].sliceElemSize = 0 // reset
+					t.storeSliceHdr[j].second))
+				j++
 			}
 		}
+		t.resetVData()
 		t.resetLogTail(false) // discard all logs.
 	}
 	return nil
@@ -492,6 +528,12 @@ func (t *undoTx) abort(realloc bool) error {
 		copy(original, logdata)
 		runtime.FlushRange(t.log[i].ptr, uintptr(t.log[i].size))
 	}
+	t.resetVData()
 	t.resetLogTail(realloc)
 	return nil
+}
+
+func (t *undoTx) resetVData() {
+	t.storeSliceHdr = make([]pair, 0, 0)
+	t.skipList = make([]int, 0, 0)
 }
