@@ -11,7 +11,6 @@ package crashtest
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"testing"
 
@@ -44,7 +43,7 @@ func TestUpdateCrash(t *testing.T) {
 
 		tx.Log(&st2.slice, []int{10, 20, 30, 40})
 		fmt.Println("[TestUpdateCrash]: Crashing now")
-		log.Fatal("") // <-- CRASHHHHH!
+		return // <-- return before ending transaction to simulate CRASH!
 	} else {
 		fmt.Println("Testing abort when logged slice is in volatile memory")
 		st2 := (*st)(pmem.Get("r1", st1))
