@@ -68,6 +68,11 @@ type (
 		m         map[unsafe.Pointer]int
 		rlocks    []*sync.RWMutex
 		wlocks    []*sync.RWMutex
+
+		// record which log entries store sliceheader, and store the size of
+		// each element in that slice. This is only used when transaction ends
+		// successfully. So this structure is stored in volatile memory.
+		storeSliceHdr []pair
 	}
 
 	redoTxHeader struct {
@@ -114,6 +119,7 @@ func initRedoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 			tx.index = i
 			tx.wlocks = make([]*sync.RWMutex, 0, 0) // Resetting volatile locks
 			tx.rlocks = make([]*sync.RWMutex, 0, 0) // before checking for data
+			tx.storeSliceHdr = make([]pair, 0, 0)
 			if tx.committed {
 				tx.commit(true)
 			} else {
@@ -134,6 +140,7 @@ func _initRedoTx(size, index int) *redoTx {
 	tx.m = make(map[unsafe.Pointer]int) // On abort m isn't used, so not in pmem
 	tx.wlocks = make([]*sync.RWMutex, 0, 0)
 	tx.rlocks = make([]*sync.RWMutex, 0, 0)
+	tx.storeSliceHdr = make([]pair, 0, 0)
 	return tx
 }
 
@@ -420,7 +427,7 @@ func (t *redoTx) writeLogEntry(ptr uintptr, data reflect.Value,
 	if data.Kind() == reflect.Slice {
 		// ptr to sliceHeader was passed for logging, so need to persist
 		// new slice too on tx complete. This will be used in t.commit()
-		t.log[tail].sliceElemSize = int(data.Type().Elem().Size())
+		t.storeSliceHdr = append(t.storeSliceHdr, pair{tail, int(data.Type().Elem().Size())})
 	}
 	return nil
 }
@@ -540,7 +547,8 @@ func (t *redoTx) unLock() {
 // Performs in-place updates of app data structures. Started again, if crashed
 // in between
 func (t *redoTx) commit(skipVolData bool) error {
-	for i := t.tail - 1; i >= 0; i-- {
+	j := 0
+	for i := 0; i < t.tail; i++ {
 		oldDataPtr := (*[maxInt]byte)(t.log[i].ptr)
 		if skipVolData && !runtime.InPmem(uintptr(unsafe.Pointer(oldDataPtr))) {
 			// If commit() was called during Init, control reaches here. If so,
@@ -552,11 +560,12 @@ func (t *redoTx) commit(skipVolData bool) error {
 		logData := logDataPtr[:t.log[i].size:t.log[i].size]
 		copy(oldData, logData)
 		runtime.PersistRange(t.log[i].ptr, uintptr(t.log[i].size))
-		if t.log[i].sliceElemSize != 0 {
+		if j < len(t.storeSliceHdr) && t.storeSliceHdr[j].first == i {
 			// ptr points to sliceHeader. So, need to persist the slice too
 			shdr := (*sliceHeader)(t.log[i].ptr)
 			runtime.PersistRange(shdr.data, uintptr(shdr.len*
-				t.log[i].sliceElemSize))
+				t.storeSliceHdr[j].second))
+			j++
 		}
 	}
 	t.committed = false
@@ -586,7 +595,7 @@ func (t *redoTx) reset(sz int) {
 		t.log[i].ptr = nil
 		t.log[i].data = nil
 		t.log[i].size = 0
-		t.log[i].sliceElemSize = 0
 	}
 	t.tail = 0
+	t.storeSliceHdr = make([]pair, 0, 0)
 }
