@@ -467,13 +467,8 @@ func (t *redoTx) Exec(intf ...interface{}) (retVal []reflect.Value, err error) {
 		}
 	}
 	t.Begin()
-	defer func() {
-		if err == nil {
-			err = t.End()
-		} else {
-			t.End() // Prevent overwriting of error if it is non-nil
-		}
-	}()
+	defer t.End()
+
 	txLevel := t.level
 	retVal = fn.Call(argv)
 	if txLevel != t.level {
@@ -489,11 +484,12 @@ func (t *redoTx) Begin() error {
 }
 
 /* Persists the update written to redoLog during the transaction lifetime. For
- * nested transactions, End() call to inner transaction does nothing.
+ * nested transactions, End() call to inner transaction does nothing. Returns a
+ * bool indicating if it is safe to release the transaction handle.
  */
-func (t *redoTx) End() error {
+func (t *redoTx) End() bool {
 	if t.level == 0 {
-		return errors.New("[redoTx] End: no transaction to commit")
+		return true
 	}
 	t.level--
 	if t.level == 0 {
@@ -509,8 +505,9 @@ func (t *redoTx) End() error {
 		runtime.PersistRange(unsafe.Pointer(&t.committed),
 			unsafe.Sizeof(t.committed))
 		t.commit(false)
+		return true
 	}
-	return nil
+	return false
 }
 
 func (t *redoTx) RLock(m *sync.RWMutex) {
