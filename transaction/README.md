@@ -26,7 +26,7 @@ The `TX` interface requires the following methods to be implemented:
 This marks the beginning of a new transaction. Nested transactions are supported
 and can be started by calling `Begin()` before the outer transaction completes.
 
-2. `End() error`
+2. `End() bool`
 This marks the end of the ongoing transaction and is equivalent to committing a 
 transaction. On the end of a transaction, all the changes known to the log are 
 persisted to pmem. Note that updates to inner transactions are not persisted if 

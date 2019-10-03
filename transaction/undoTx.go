@@ -426,13 +426,7 @@ func (t *undoTx) Exec(intf ...interface{}) (retVal []reflect.Value, err error) {
 		}
 	}
 	t.Begin()
-	defer func() {
-		if err == nil {
-			err = t.End()
-		} else {
-			t.End() // Prevent overwriting of error if it is non-nil
-		}
-	}()
+	defer t.End()
 	txLevel := t.level
 	retVal = fn.Call(argv)
 	if txLevel != t.level {
@@ -450,11 +444,12 @@ func (t *undoTx) Begin() error {
 /* Also persists the new data written by application, so application
  * doesn't need to do it separately. For nested transactions, End() call to
  * inner transaction does nothing. Only when the outermost transaction ends,
- * all application data is flushed to pmem.
+ * all application data is flushed to pmem. Returns a bool indicating if it
+ * is safe to release the transaction handle.
  */
-func (t *undoTx) End() error {
+func (t *undoTx) End() bool {
 	if t.level == 0 {
-		return errors.New("[undoTx] End: no transaction to commit!")
+		return true
 	}
 	t.level--
 	if t.level == 0 {
@@ -482,8 +477,9 @@ func (t *undoTx) End() error {
 		}
 		t.resetVData()
 		t.resetLogTail(false) // discard all logs.
+		return true
 	}
-	return nil
+	return false
 }
 
 func (t *undoTx) RLock(m *sync.RWMutex) {
