@@ -27,7 +27,7 @@ type (
 		Log(...interface{}) error
 		ReadLog(...interface{}) interface{}
 		Exec(...interface{}) ([]reflect.Value, error)
-		End() error
+		End() bool
 		RLock(*sync.RWMutex)
 		WLock(*sync.RWMutex)
 		Lock(*sync.RWMutex)

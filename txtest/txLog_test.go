@@ -416,6 +416,16 @@ func TestUndoLogBasic(t *testing.T) {
 	if struct1.slice != nil {
 		assertEqual(t, 0, 1) // Assert
 	}
+
+	fmt.Println("Testing End() return value for inner, outer transaction")
+	undoTx = transaction.NewUndoTx()
+	undoTx.Begin()
+	undoTx.Begin()
+	b := undoTx.End()
+	assertEqual(t, b, false)
+	b = undoTx.End()
+	assertEqual(t, b, true)
+	transaction.Release(undoTx)
 }
 
 func TestReadLog(t *testing.T) {
@@ -949,6 +959,16 @@ func TestRedoLogBasic(t *testing.T) {
 	assertEqual(t, y[0], 10)
 	transaction.Release(redoTx)
 	assertEqual(t, y[0], 10)
+
+	fmt.Println("Testing End() return value for inner, outer transaction")
+	redoTx = transaction.NewRedoTx()
+	redoTx.Begin()
+	redoTx.Begin()
+	b := redoTx.End()
+	assertEqual(t, b, false)
+	b = redoTx.End()
+	assertEqual(t, b, true)
+	transaction.Release(redoTx)
 }
 
 func TestRedoLogIsolation(t *testing.T) {
