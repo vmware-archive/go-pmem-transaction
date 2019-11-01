@@ -25,6 +25,7 @@ type (
 	TX interface {
 		Begin() error
 		Log(...interface{}) error
+		Log2(src, dst unsafe.Pointer, size uintptr) error
 		ReadLog(...interface{}) interface{}
 		Exec(...interface{}) ([]reflect.Value, error)
 		End() bool
