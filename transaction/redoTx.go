@@ -289,6 +289,11 @@ func checkDataTypes(newV reflect.Value, v1 reflect.Value) (err error) {
 	return err
 }
 
+func (t *redoTx) Log2(src, dst unsafe.Pointer, size uintptr) error {
+	log.Fatal("Not implemented")
+	return nil
+}
+
 // Caveat: With the current implementation, Redo Log doesn't support logging
 // structs with unexported slice, struct, interface members. Individual fields
 // of struct can be logged.

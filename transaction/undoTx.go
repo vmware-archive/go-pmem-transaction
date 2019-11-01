@@ -255,6 +255,27 @@ func (t *undoTx) readSlice(slicePtr interface{}, stIndex int,
 	return s.Slice(stIndex, endIndex).Interface()
 }
 
+func (t *undoTx) Log2(src, dst unsafe.Pointer, size uintptr) error {
+	tail := t.tail
+	// Append data to log entry.
+	t.log[tail].ptr = src        // point to orignal data
+	t.log[tail].data = dst       // point to logged copy
+	t.log[tail].size = int(size) // size of data
+
+	srcByte := (*[maxInt]byte)(src)
+	dstByte := (*[maxInt]byte)(dst)
+	copy(dstByte[:size], srcByte[:size])
+
+	// Flush logged data copy and entry.
+	runtime.FlushRange(dst, size)
+	runtime.FlushRange(unsafe.Pointer(&t.log[tail]),
+		unsafe.Sizeof(t.log[tail]))
+
+	// Update log offset in header.
+	t.increaseLogTail()
+	return nil
+}
+
 // TODO: Logging slice of slice not supported
 func (t *undoTx) Log(intf ...interface{}) error {
 	doUpdate := false
