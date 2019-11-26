@@ -54,30 +54,32 @@ type (
 		first  int
 		second int
 	}
+	// Volatile metadata associated with each transaction handle. These are
+	// helpful in the common case when transaction ends successfully.
+	vData struct {
 
-	undoTx struct {
-		log []entry
-
-		// stores the tail position of the log where new data would be stored
+		// tail position of the log where new data would be stored
 		tail int
 
 		// Level of nesting. Needed for nested transactions
 		level int
 
-		// Index of the log handle within undoArray
-		index int
-
-		rlocks []*sync.RWMutex
-		wlocks []*sync.RWMutex
-
 		// record which log entries store sliceheader, and store the size of
-		// each element in that slice. This is only used when transaction ends
-		// successfully. So this structure is stored in volatile memory.
+		// each element in that slice.
 		storeSliceHdr []pair
 
 		// list of log entries which need not be flushed during transaction's
-		// successful end. This structure is stored in volatile memory.
+		// successful end.
 		skipList []int
+		rlocks   []*sync.RWMutex
+		wlocks   []*sync.RWMutex
+	}
+
+	undoTx struct {
+		log []entry
+		v   *vData
+		// Index of the log handle within undoArray
+		index int
 	}
 
 	undoTxHeader struct {
@@ -121,13 +123,10 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 		for i := 0; i < logNum; i++ {
 			tx := txHeaderPtr.logPtr[i]
 			tx.index = i
-			tx.wlocks = make([]*sync.RWMutex, 0, 0) // Resetting volatile locks
-			tx.rlocks = make([]*sync.RWMutex, 0, 0) // before checking for data
-			tx.resetVData()
-			// The value of tail is unreliable here as it might have been set
-			// as 0 during a previous recovery. Hence ask abort() to reallocate
-			// the array for the log entries.
+			// Reallocate the array for the log entries. TODO: How does this
+			// change with tail not in pmem?
 			tx.abort(true)
+			tx.resetVData()
 		}
 	}
 
@@ -138,8 +137,6 @@ func _initUndoTx(size, index int) *undoTx {
 	tx := pnew(undoTx)
 	tx.log = pmake([]entry, size)
 	runtime.PersistRange(unsafe.Pointer(&tx.log), unsafe.Sizeof(tx.log))
-	tx.wlocks = make([]*sync.RWMutex, 0, 0)
-	tx.rlocks = make([]*sync.RWMutex, 0, 0)
 	tx.resetVData()
 	tx.index = index
 	return tx
@@ -161,41 +158,38 @@ func releaseUndoTx(t *undoTx) {
 }
 
 func (t *undoTx) setTail(tail int) {
-	runtime.Fence()
-	t.tail = tail
-	runtime.PersistRange(unsafe.Pointer(&t.tail), ptrSize)
+	t.v.tail = tail
 }
 
 // The realloc parameter indicates if the backing array for the log entries
 // need to be reallocated.
-func (t *undoTx) resetLogTail(realloc bool) {
-	tail := t.tail
-	if tail != 0 {
-		t.setTail(0)
-	}
-
+func (t *undoTx) resetLogData(realloc bool) {
 	if realloc {
-		// Allocate a new backing array if realloc is true or if the array was
-		// expanded to accommodate more log entries.
+		// Allocate a new backing array if realloc is true. After a program
+		// crash, we must always reach here
 		t.log = pmake([]entry, NumEntries)
 		runtime.PersistRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
 	} else {
 		// Zero out the pointers in the log entries so that the data pointed by
 		// them will be garbage collected.
-		for i := 0; i < tail; i++ {
+		for i := 0; i < len(t.log); i++ {
+			if t.log[i].genNum == 0 { // TODO: looping over all log entries can
+				// be avoided once we get first log entry with genNum==0.
+				// Assumption that this is executed only when there is no program
+				// crash
+				break
+			}
 			t.log[i].ptr = nil
 			t.log[i].data = nil
-			runtime.FlushRange(unsafe.Pointer(&t.log[i].ptr), 2*ptrSize)
+			t.log[i].genNum = 0
+			runtime.FlushRange(unsafe.Pointer(&t.log[i].ptr), 3*ptrSize)
 		}
-		// Fence can be avoided here because when we log a new entry, we will
-		// call a store fence before updating the value of tail. And if we crash
-		// at this point, a new log array will be allocated in the restart path.
 	}
 }
 
 // Also takes care of increasing the number of entries underlying log can hold
 func (t *undoTx) increaseLogTail() {
-	tail := t.tail + 1 // new tail
+	tail := t.v.tail + 1 // new tail
 	if tail >= cap(t.log) {
 		newE := 2 * cap(t.log) // Double number of entries which can be stored
 		newLog := pmake([]entry, newE)
@@ -203,8 +197,7 @@ func (t *undoTx) increaseLogTail() {
 		runtime.PersistRange(unsafe.Pointer(&newLog[0]),
 			uintptr(newE)*unsafe.Sizeof(newLog[0])) // Persist new log
 		t.log = newLog
-		// There is a fence immediately after this in setTail()
-		runtime.FlushRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
+		runtime.PersistRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
 	}
 	// common case
 	t.setTail(tail)
@@ -256,11 +249,12 @@ func (t *undoTx) readSlice(slicePtr interface{}, stIndex int,
 }
 
 func (t *undoTx) Log2(src, dst unsafe.Pointer, size uintptr) error {
-	tail := t.tail
+	tail := t.v.tail
 	// Append data to log entry.
 	t.log[tail].ptr = src        // point to orignal data
 	t.log[tail].data = dst       // point to logged copy
 	t.log[tail].size = int(size) // size of data
+	t.log[tail].genNum = 1
 
 	srcByte := (*[maxInt]byte)(src)
 	dstByte := (*[maxInt]byte)(dst)
@@ -270,7 +264,7 @@ func (t *undoTx) Log2(src, dst unsafe.Pointer, size uintptr) error {
 	runtime.FlushRange(dst, size)
 	runtime.FlushRange(unsafe.Pointer(&t.log[tail]),
 		unsafe.Sizeof(t.log[tail]))
-
+	runtime.Fence()
 	// Update log offset in header.
 	t.increaseLogTail()
 	return nil
@@ -297,13 +291,13 @@ func (t *undoTx) Log(intf ...interface{}) error {
 	case reflect.Slice:
 		t.logSlice(v1, true)
 	case reflect.Ptr:
-		tail := t.tail
+		tail := t.v.tail
 		oldv := reflect.Indirect(v1) // get the underlying data of pointer
 		typ := oldv.Type()
 		if oldv.Kind() == reflect.Slice {
 			// record this log entry and store size of each slice element.
 			// Used later during End()
-			t.storeSliceHdr = append(t.storeSliceHdr, pair{tail, int(typ.Elem().Size())})
+			t.v.storeSliceHdr = append(t.v.storeSliceHdr, pair{tail, int(typ.Elem().Size())})
 		}
 		size := int(typ.Size())
 		v2 := reflect.PNew(oldv.Type())
@@ -312,7 +306,8 @@ func (t *undoTx) Log(intf ...interface{}) error {
 		// Append data to log entry.
 		t.log[tail].ptr = unsafe.Pointer(v1.Pointer())  // point to orignal data
 		t.log[tail].data = unsafe.Pointer(v2.Pointer()) // point to logged copy
-		t.log[tail].size = size                         // size of data
+		t.log[tail].genNum = 1
+		t.log[tail].size = size // size of data
 
 		// Flush logged data copy and entry.
 		runtime.FlushRange(t.log[tail].data, uintptr(size))
@@ -383,10 +378,11 @@ func (t *undoTx) logSlice(v1 reflect.Value, flushAtEnd bool) {
 		destPtr := (*[maxInt]byte)(vshdr.data)[:size:size]
 		copy(destPtr, sourcePtr)
 	}
-	tail := t.tail
+	tail := t.v.tail
 	t.log[tail].ptr = unsafe.Pointer(v1.Pointer())  // point to original data
 	t.log[tail].data = unsafe.Pointer(v2.Pointer()) // point to logged copy
-	t.log[tail].size = size                         // size of data
+	t.log[tail].genNum = 1
+	t.log[tail].size = size // size of data
 
 	if !flushAtEnd {
 		// This happens when sliceheader is logged. User can then update
@@ -394,7 +390,7 @@ func (t *undoTx) logSlice(v1 reflect.Value, flushAtEnd bool) {
 		// flushed in End(), new slice contents also must be flushed in End().
 		// So this log entry containing old slice contents don't have to be
 		// flushed in End(). Add this to list of entries to be skipped.
-		t.skipList = append(t.skipList, tail)
+		t.v.skipList = append(t.v.skipList, tail)
 	}
 
 	// Flush logged data copy and entry.
@@ -448,9 +444,9 @@ func (t *undoTx) Exec(intf ...interface{}) (retVal []reflect.Value, err error) {
 	}
 	t.Begin()
 	defer t.End()
-	txLevel := t.level
+	txLevel := t.v.level
 	retVal = fn.Call(argv)
-	if txLevel != t.level {
+	if txLevel != t.v.level {
 		return retVal, errors.New("[undoTx] Exec: Unbalanced Begin() & End() " +
 			"calls inside function passed to Exec")
 	}
@@ -458,7 +454,7 @@ func (t *undoTx) Exec(intf ...interface{}) (retVal []reflect.Value, err error) {
 }
 
 func (t *undoTx) Begin() error {
-	t.level++
+	t.v.level++
 	return nil
 }
 
@@ -469,35 +465,36 @@ func (t *undoTx) Begin() error {
  * is safe to release the transaction handle.
  */
 func (t *undoTx) End() bool {
-	if t.level == 0 {
+	if t.v.level == 0 {
 		return true
 	}
-	t.level--
-	if t.level == 0 {
+	t.v.level--
+	if t.v.level == 0 {
 		defer t.unLock()
 
 		var j, k int
 		// Need to flush current value of logged areas
-		for i := 0; i < t.tail; i++ {
+		for i := 0; i < t.v.tail; i++ {
 			// If entry recorded in skiplist, do nothing
-			if k < len(t.skipList) && t.skipList[k] == i {
+			if k < len(t.v.skipList) && t.v.skipList[k] == i {
 				k++
 				continue
 			}
 
 			runtime.FlushRange(t.log[i].ptr, uintptr(t.log[i].size))
 
-			if j < len(t.storeSliceHdr) && t.storeSliceHdr[j].first == i {
+			if j < len(t.v.storeSliceHdr) && t.v.storeSliceHdr[j].first == i {
 				// ptr points to sliceHeader. So, need to persist the slice too
 				// We also skip flushing the original slice
 				shdr := (*sliceHeader)(t.log[i].ptr)
 				runtime.FlushRange(shdr.data, uintptr(shdr.len*
-					t.storeSliceHdr[j].second))
+					t.v.storeSliceHdr[j].second))
 				j++
 			}
 		}
+		runtime.Fence()
 		t.resetVData()
-		t.resetLogTail(false) // discard all logs.
+		t.resetLogData(false) // discard all logs.
 		return true
 	}
 	return false
@@ -505,12 +502,12 @@ func (t *undoTx) End() bool {
 
 func (t *undoTx) RLock(m *sync.RWMutex) {
 	m.RLock()
-	t.rlocks = append(t.rlocks, m)
+	t.v.rlocks = append(t.v.rlocks, m)
 }
 
 func (t *undoTx) WLock(m *sync.RWMutex) {
 	m.Lock()
-	t.wlocks = append(t.wlocks, m)
+	t.v.wlocks = append(t.v.wlocks, m)
 }
 
 func (t *undoTx) Lock(m *sync.RWMutex) {
@@ -518,17 +515,17 @@ func (t *undoTx) Lock(m *sync.RWMutex) {
 }
 
 func (t *undoTx) unLock() {
-	for i, m := range t.wlocks {
+	for i, m := range t.v.wlocks {
 		m.Unlock()
-		t.wlocks[i] = nil
+		t.v.wlocks[i] = nil
 	}
-	t.wlocks = t.wlocks[:0]
+	t.v.wlocks = t.v.wlocks[:0]
 
-	for i, m := range t.rlocks {
+	for i, m := range t.v.rlocks {
 		m.RUnlock()
-		t.rlocks[i] = nil
+		t.v.rlocks[i] = nil
 	}
-	t.rlocks = t.rlocks[:0]
+	t.v.rlocks = t.v.rlocks[:0]
 }
 
 // The realloc parameter indicates if the backing array for the log entries
@@ -536,8 +533,15 @@ func (t *undoTx) unLock() {
 func (t *undoTx) abort(realloc bool) error {
 	defer t.unLock()
 	// Replay undo logs. Order last updates first, during abort
-	t.level = 0
-	for i := t.tail - 1; i >= 0; i-- {
+	t.v.level = 0
+	l := len(t.log)
+	for i := l - 1; i >= 0; i-- {
+		if t.log[i].genNum == 0 { // no data in this log entry. TODO: This can
+			// be avoided if we guarantee update to one memory location is stored
+			// just once in the log entries. Then, we can loop forward & when
+			// we get genNum==0 we can exit the loop.
+			continue
+		}
 		origDataPtr := (*[maxInt]byte)(t.log[i].ptr)
 		logDataPtr := (*[maxInt]byte)(t.log[i].data)
 		original := origDataPtr[:t.log[i].size:t.log[i].size]
@@ -545,12 +549,12 @@ func (t *undoTx) abort(realloc bool) error {
 		copy(original, logdata)
 		runtime.FlushRange(t.log[i].ptr, uintptr(t.log[i].size))
 	}
+	runtime.Fence()
+	t.resetLogData(realloc)
 	t.resetVData()
-	t.resetLogTail(realloc)
 	return nil
 }
 
 func (t *undoTx) resetVData() {
-	t.storeSliceHdr = make([]pair, 0, 0)
-	t.skipList = make([]int, 0, 0)
+	t.v = new(vData)
 }
