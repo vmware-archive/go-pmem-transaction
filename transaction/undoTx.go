@@ -251,21 +251,11 @@ func (t *undoTx) readSlice(slicePtr interface{}, stIndex int,
 func (t *undoTx) Log2(src, dst unsafe.Pointer, size uintptr) error {
 	tail := t.v.tail
 	// Append data to log entry.
-	t.log[tail].ptr = src        // point to orignal data
-	t.log[tail].data = dst       // point to logged copy
-	t.log[tail].size = int(size) // size of data
-	t.log[tail].genNum = 1
+	movnt(dst, src, size)
+	movnt(unsafe.Pointer(&t.log[tail]), unsafe.Pointer(&entry{src, dst, int(size), 0}), unsafe.Sizeof(t.log[tail]))
 
-	srcByte := (*[maxInt]byte)(src)
-	dstByte := (*[maxInt]byte)(dst)
-	copy(dstByte[:size], srcByte[:size])
-
-	// Flush logged data copy and entry.
-	runtime.FlushRange(dst, size)
-	runtime.FlushRange(unsafe.Pointer(&t.log[tail]),
-		unsafe.Sizeof(t.log[tail]))
+	// Fence after movnt
 	runtime.Fence()
-	// Update log offset in header.
 	t.increaseLogTail()
 	return nil
 }
