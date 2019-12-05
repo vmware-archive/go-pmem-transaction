@@ -73,6 +73,7 @@ type (
 		skipList []int
 		rlocks   []*sync.RWMutex
 		wlocks   []*sync.RWMutex
+		fs       *flushSt
 	}
 
 	undoTx struct {
@@ -173,10 +174,7 @@ func (t *undoTx) resetLogData(realloc bool) {
 		// Zero out the pointers in the log entries so that the data pointed by
 		// them will be garbage collected.
 		for i := 0; i < len(t.log); i++ {
-			if t.log[i].genNum == 0 { // TODO: looping over all log entries can
-				// be avoided once we get first log entry with genNum==0.
-				// Assumption that this is executed only when there is no program
-				// crash
+			if t.log[i].genNum == 0 {
 				break
 			}
 			t.log[i].ptr = nil
@@ -252,10 +250,11 @@ func (t *undoTx) Log2(src, dst unsafe.Pointer, size uintptr) error {
 	tail := t.v.tail
 	// Append data to log entry.
 	movnt(dst, src, size)
-	movnt(unsafe.Pointer(&t.log[tail]), unsafe.Pointer(&entry{src, dst, int(size), 0}), unsafe.Sizeof(t.log[tail]))
+	movnt(unsafe.Pointer(&t.log[tail]), unsafe.Pointer(&entry{src, dst, int(size), 1}), unsafe.Sizeof(t.log[tail]))
 
-	// Update log offset in header. increaseLogTail calls Fence internally.
-	// So, not adding additional fence after movnt here.
+	// Fence after movnt
+	runtime.Fence()
+	t.v.fs.insert(uintptr(src), size)
 	t.increaseLogTail()
 	return nil
 }
@@ -461,30 +460,10 @@ func (t *undoTx) End() bool {
 	t.v.level--
 	if t.v.level == 0 {
 		defer t.unLock()
-
-		var j, k int
-		// Need to flush current value of logged areas
-		for i := 0; i < t.v.tail; i++ {
-			// If entry recorded in skiplist, do nothing
-			if k < len(t.v.skipList) && t.v.skipList[k] == i {
-				k++
-				continue
-			}
-
-			runtime.FlushRange(t.log[i].ptr, uintptr(t.log[i].size))
-
-			if j < len(t.v.storeSliceHdr) && t.v.storeSliceHdr[j].first == i {
-				// ptr points to sliceHeader. So, need to persist the slice too
-				// We also skip flushing the original slice
-				shdr := (*sliceHeader)(t.log[i].ptr)
-				runtime.FlushRange(shdr.data, uintptr(shdr.len*
-					t.v.storeSliceHdr[j].second))
-				j++
-			}
-		}
-		runtime.Fence()
+		t.v.fs.flushAndDestroy()
 		t.resetVData()
 		t.resetLogData(false) // discard all logs.
+		runtime.Fence()
 		return true
 	}
 	return false
@@ -547,4 +526,5 @@ func (t *undoTx) abort(realloc bool) error {
 
 func (t *undoTx) resetVData() {
 	t.v = new(vData)
+	t.v.fs = new(flushSt)
 }
