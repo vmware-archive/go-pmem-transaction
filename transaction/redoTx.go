@@ -288,6 +288,10 @@ func checkDataTypes(newV reflect.Value, v1 reflect.Value) (err error) {
 	}
 	return err
 }
+func (t *redoTx) Log3(src unsafe.Pointer, size uintptr) error {
+	log.Fatal("Not implemented")
+	return nil
+}
 
 func (t *redoTx) Log2(src, dst unsafe.Pointer, size uintptr) error {
 	log.Fatal("Not implemented")
