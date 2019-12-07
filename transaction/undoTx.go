@@ -255,6 +255,8 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 		t.increaseLogTail()
 	}
 
+	t.v.ptrArray = runtime.LogAddPtrs(uintptr(src), int(size), t.v.ptrArray)
+
 	// TO DELETE
 	/*if uintptr(tmpBuf)%64 != 0 {
 		println("tmp array address = ", tmpBuf)
