@@ -80,11 +80,10 @@ type (
 	}
 
 	undoTx struct {
-		log [65536]byte
 		v   *vData
+		log []byte
 		// Index of the log handle within undoArray
 		index int
-		junk  [48]byte
 	}
 
 	undoTxHeader struct {
@@ -103,6 +102,10 @@ var (
 	zeroes      [64]byte // Go guarantees that variables will be zeroed out
 )
 
+const (
+	undoLogInitSize = 65536
+)
+
 /* Does the first time initialization, else restores log structure and
  * reverts uncommitted logs. Does not do any pointer swizzle. This will be
  * handled by Go-pmem runtime. Returns the pointer to undoTX internal structure,
@@ -114,7 +117,7 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 		// First time initialization
 		txHeaderPtr = pnew(undoTxHeader)
 		for i := 0; i < logNum; i++ {
-			txHeaderPtr.logPtr[i] = _initUndoTx(NumEntries, i)
+			txHeaderPtr.logPtr[i] = _initUndoTx(undoLogInitSize, i)
 		}
 		// Write the magic constant after the transaction handles are persisted.
 		// NewUndoTx() can then check this constant to ensure all tx handles
@@ -145,10 +148,8 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 
 func _initUndoTx(size, index int) *undoTx {
 	tx := pnew(undoTx)
-	txU := uintptr(unsafe.Pointer(tx))
-	if txU%64 != 0 {
-		println("Index ", index, " not cache aligned")
-	}
+	tx.log = pmake([]byte, size)
+	runtime.PersistRange(unsafe.Pointer(&tx.log), unsafe.Sizeof(tx.log))
 
 	tx.resetVData()
 	tx.index = index
@@ -179,13 +180,27 @@ func (t *undoTx) setTail(tail int) {
 func (t *undoTx) resetLogData(realloc bool) {
 
 	// TODO -- delete the pointer array
-	// nothing to do after this
-	return
+
+	if realloc {
+		// Allocate a new backing array if realloc is true. After a program
+		// crash, we must always reach here
+		t.log = pmake([]byte, undoLogInitSize)
+		runtime.PersistRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
+	} else {
+		// Nothing to do
+	}
 }
 
 // Also takes care of increasing the number of entries underlying log can hold
 func (t *undoTx) increaseLogTail() {
-	/**/
+	newE := 2 * cap(t.log) // Double number of entries which can be stored
+	newLog := pmake([]byte, newE)
+	copy(newLog, t.log)
+	runtime.PersistRange(unsafe.Pointer(&newLog[0]),
+		uintptr(newE)*unsafe.Sizeof(newLog[0])) // Persist new log
+	t.log = newLog
+	runtime.PersistRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
+
 }
 
 type value struct {
@@ -238,6 +253,11 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 	sizeBackup := size
 	srcU := uintptr(src)
 	tmpBuf := unsafe.Pointer(&t.v.tmpBuf[0])
+
+	toAdd := int((size+16+63)/64) * 64
+	if tail+toAdd > cap(t.log) { // READS CACHELINE
+		t.increaseLogTail()
+	}
 
 	// TO DELETE
 	if uintptr(tmpBuf)%64 != 0 {
@@ -323,10 +343,6 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 	// Fence after movnt
 	runtime.Fence()
 	t.v.fs.insert(uintptr(src), sizeBackup)
-
-	if tail > 65536 {
-		log.Fatal("Out of space")
-	}
 
 	//t.setTail(tail)
 	t.v.tail = tail
