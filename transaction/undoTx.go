@@ -92,10 +92,6 @@ type (
 	}
 )
 
-func init() {
-	println("size of undo tx is ", unsafe.Sizeof(undoTx{}))
-}
-
 var (
 	txHeaderPtr *undoTxHeader
 	undoArray   *bitmap
@@ -260,10 +256,10 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 	}
 
 	// TO DELETE
-	if uintptr(tmpBuf)%64 != 0 {
+	/*if uintptr(tmpBuf)%64 != 0 {
 		println("tmp array address = ", tmpBuf)
 		log.Fatal("tmp array is not cache aligned!")
-	}
+	}*/
 
 	// Append data to log entry.
 
@@ -297,9 +293,9 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 		}
 	*/
 	movnt(unsafe.Pointer(&t.log[tail]), tmpBuf, cacheSize)
-	if uintptr(unsafe.Pointer(&t.log[tail]))%cacheSize != 0 {
+	/*if uintptr(unsafe.Pointer(&t.log[tail]))%cacheSize != 0 {
 		log.Fatal("Unaligned address 1")
-	}
+	}*/
 	tail += cacheSize
 
 	// Copy remaining 64 byte aligned entries
@@ -309,9 +305,9 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 		copy(destSlc, srcSlc)
 
 		movnt(unsafe.Pointer(&t.log[tail]), tmpBuf, cacheSize)
-		if uintptr(unsafe.Pointer(&t.log[tail]))%cacheSize != 0 {
+		/*if uintptr(unsafe.Pointer(&t.log[tail]))%cacheSize != 0 {
 			log.Fatal("Unaligned address 2")
-		}
+		}*/
 		size -= cacheSize
 		srcU += cacheSize
 		tail += cacheSize
@@ -319,9 +315,9 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 
 	// Copy the final < 64-byte entry
 	sz = size
-	if size >= cacheSize { // DEBUG : TO DELETE
+	/*if size >= cacheSize { // DEBUG : TO DELETE
 		log.Fatal("Invalid size")
-	}
+	}*/
 	if sz > 0 {
 		destSlc = (*(*[1 << 28]byte)(tmpBuf))[:]
 		srcSlc = (*(*[1 << 28]byte)(unsafe.Pointer(srcU)))[:sz]
@@ -333,9 +329,9 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 				log.Fatal("Invalid size")
 			}
 		*/
-		if uintptr(unsafe.Pointer(&t.log[tail]))%cacheSize != 0 {
+		/*if uintptr(unsafe.Pointer(&t.log[tail]))%cacheSize != 0 {
 			log.Fatal("Unaligned address 3")
-		}
+		}*/
 		movnt(unsafe.Pointer(&t.log[tail]), tmpBuf, cacheSize)
 		tail += cacheSize
 	}
