@@ -193,7 +193,7 @@ func (t *undoTx) resetLogData(realloc bool) {
 func (tv *vData) increaseLogTail() {
 	txn := tv.txp
 	//println("tv ", unsafe.Pointer(tv), " increasing from ", cap(txn.log), " to ", 2*cap(txn.log))
-	newE := 2 * cap(txn.log) // Double number of entries which can be stored
+	newE := 4 * cap(txn.log) // Double number of entries which can be stored
 	newLog := pmake([]byte, newE)
 	copy(newLog, txn.log)
 	runtime.PersistRange(unsafe.Pointer(&newLog[0]),
