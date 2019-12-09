@@ -644,12 +644,12 @@ func (tv *vData) abort(realloc bool) error {
 }
 
 func resetVData(index int) {
-	txp := unsafe.Pointer(uintptr(0))
-	if tVData[index] != nil {
-		txp = unsafe.Pointer(tVData[index].txp)
+	if tVData[index] == nil {
+		tVData[index] = new(vData)
+		tVData[index].index = index
+		//return
 	}
-	tVData[index] = new(vData)
+	tVData[index].ptrArray = tVData[index].ptrArray[:0]
 	tVData[index].fs = new(flushSt)
-	tVData[index].index = index
-	tVData[index].txp = (*undoTx)(txp)
+	tVData[index].tail = 0
 }

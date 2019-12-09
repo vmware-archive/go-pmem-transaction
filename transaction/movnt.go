@@ -13,9 +13,7 @@ func movnt32b(dst, src uintptr)
 
 // issue clwb, but no fence
 func memmove_small_clwb(dst, src, len uintptr) {
-	if len == 0 {
-		return
-	}
+	// Check len before coming to this fn
 	srcByte := (*[maxInt]byte)(unsafe.Pointer(src))
 	dstByte := (*[maxInt]byte)(unsafe.Pointer(dst))
 	copy(dstByte[:len], srcByte[:len])
@@ -44,7 +42,9 @@ func memmove_small(dst, src, len uintptr) {
 	}
 	// We cannot issue movnt because either the data structure is < 4B at this
 	// point or it is unaligned. Let's issue clwb.
-	memmove_small_clwb(dst, src, len)
+	if len > 0 {
+		memmove_small_clwb(dst, src, len)
+	}
 }
 
 // caller needs to put memory barrier to ensure ordering of stores
