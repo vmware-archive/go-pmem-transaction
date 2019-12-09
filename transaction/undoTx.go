@@ -76,14 +76,14 @@ type (
 		rlocks   []*sync.RWMutex
 		wlocks   []*sync.RWMutex
 		fs       *flushSt
-		junk     [48]byte //  to make tmpBuf cache aligned
+		index    int
+		txp      *undoTx
+		junk     [32]byte //  to make tmpBuf cache aligned
 	}
 
 	undoTx struct {
-		v   *vData
 		log []byte
 		// Index of the log handle within undoArray
-		index int
 	}
 
 	undoTxHeader struct {
@@ -258,10 +258,10 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 	t.v.ptrArray = runtime.LogAddPtrs(uintptr(src), int(size), t.v.ptrArray)
 
 	// TO DELETE
-	/*if uintptr(tmpBuf)%64 != 0 {
+	if uintptr(tmpBuf)%64 != 0 {
 		println("tmp array address = ", tmpBuf)
 		log.Fatal("tmp array is not cache aligned!")
-	}*/
+	}
 
 	// Append data to log entry.
 
@@ -307,9 +307,9 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 		copy(destSlc, srcSlc)
 
 		movnt(unsafe.Pointer(&t.log[tail]), tmpBuf, cacheSize)
-		/*if uintptr(unsafe.Pointer(&t.log[tail]))%cacheSize != 0 {
+		if uintptr(unsafe.Pointer(&t.log[tail]))%cacheSize != 0 {
 			log.Fatal("Unaligned address 2")
-		}*/
+		}
 		size -= cacheSize
 		srcU += cacheSize
 		tail += cacheSize
@@ -331,9 +331,9 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 				log.Fatal("Invalid size")
 			}
 		*/
-		/*if uintptr(unsafe.Pointer(&t.log[tail]))%cacheSize != 0 {
+		if uintptr(unsafe.Pointer(&t.log[tail]))%cacheSize != 0 {
 			log.Fatal("Unaligned address 3")
-		}*/
+		}
 		movnt(unsafe.Pointer(&t.log[tail]), tmpBuf, cacheSize)
 		tail += cacheSize
 	}
