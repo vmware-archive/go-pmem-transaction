@@ -61,7 +61,7 @@ func Init(logHeadPtr unsafe.Pointer, logType string) unsafe.Pointer {
 
 func Release(t TX) {
 	switch v := t.(type) {
-	case *undoTx:
+	case *vData:
 		releaseUndoTx(v)
 	case *redoTx:
 		releaseRedoTx(v)

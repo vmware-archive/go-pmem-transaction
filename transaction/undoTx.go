@@ -96,6 +96,7 @@ var (
 	txHeaderPtr *undoTxHeader
 	undoArray   *bitmap
 	zeroes      [64]byte // Go guarantees that variables will be zeroed out
+	tVData      [logNum]*vData
 )
 
 const (
@@ -113,7 +114,9 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 		// First time initialization
 		txHeaderPtr = pnew(undoTxHeader)
 		for i := 0; i < logNum; i++ {
-			txHeaderPtr.logPtr[i] = _initUndoTx(undoLogInitSize, i)
+			ptr := _initUndoTx(undoLogInitSize, i)
+			txHeaderPtr.logPtr[i] = ptr
+			tVData[i].txp = ptr
 		}
 		// Write the magic constant after the transaction handles are persisted.
 		// NewUndoTx() can then check this constant to ensure all tx handles
@@ -131,11 +134,12 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 		// Recover data from previous pending transactions, if any
 		for i := 0; i < logNum; i++ {
 			tx := txHeaderPtr.logPtr[i]
-			tx.index = i
+			tVData[i] = new(vData)
+			tVData[i].txp = tx
+			tVData[i].index = i
 			// Reallocate the array for the log entries. TODO: How does this
 			// change with tail not in pmem?
-			tx.abort(true)
-			tx.resetVData()
+			tVData[i].abort(true)
 		}
 	}
 
@@ -146,9 +150,7 @@ func _initUndoTx(size, index int) *undoTx {
 	tx := pnew(undoTx)
 	tx.log = pmake([]byte, size)
 	runtime.PersistRange(unsafe.Pointer(&tx.log), unsafe.Sizeof(tx.log))
-
-	tx.resetVData()
-	tx.index = index
+	resetVData(index)
 	return tx
 }
 
@@ -157,45 +159,47 @@ func NewUndoTx() TX {
 		log.Fatal("Undo log not correctly initialized!")
 	}
 	index := undoArray.nextAvailable()
-	return txHeaderPtr.logPtr[index]
+	return tVData[index]
 }
 
-func releaseUndoTx(t *undoTx) {
+func releaseUndoTx(tv *vData) {
 	// Reset the pointers in the log entries, but need not allocate a new
 	// backing array
-	t.abort(false)
-	undoArray.clearBit(t.index)
+	tv.abort(false)
+	undoArray.clearBit(tv.index)
 }
 
-func (t *undoTx) setTail(tail int) {
-	t.v.tail = tail
+func (tv *vData) setTail(tail int) {
+	tv.tail = tail
 }
 
 // The realloc parameter indicates if the backing array for the log entries
 // need to be reallocated.
 func (t *undoTx) resetLogData(realloc bool) {
 
-	// TODO -- delete the pointer array
+	// TODO -- we are not trimming the log array
 
 	if realloc {
 		// Allocate a new backing array if realloc is true. After a program
 		// crash, we must always reach here
-		t.log = pmake([]byte, undoLogInitSize)
-		runtime.PersistRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
+		//t.log = pmake([]byte, undoLogInitSize)
+		//runtime.PersistRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
 	} else {
 		// Nothing to do
 	}
 }
 
 // Also takes care of increasing the number of entries underlying log can hold
-func (t *undoTx) increaseLogTail() {
-	newE := 2 * cap(t.log) // Double number of entries which can be stored
+func (tv *vData) increaseLogTail() {
+	txn := tv.txp
+	//println("tv ", unsafe.Pointer(tv), " increasing from ", cap(txn.log), " to ", 2*cap(txn.log))
+	newE := 2 * cap(txn.log) // Double number of entries which can be stored
 	newLog := pmake([]byte, newE)
-	copy(newLog, t.log)
+	copy(newLog, txn.log)
 	runtime.PersistRange(unsafe.Pointer(&newLog[0]),
 		uintptr(newE)*unsafe.Sizeof(newLog[0])) // Persist new log
-	t.log = newLog
-	runtime.PersistRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
+	txn.log = newLog
+	runtime.PersistRange(unsafe.Pointer(&txn.log), unsafe.Sizeof(txn.log))
 
 }
 
@@ -212,11 +216,12 @@ type sliceHeader struct {
 	cap  int
 }
 
-func (t *undoTx) ReadLog(intf ...interface{}) (retVal interface{}) {
+func (tv *vData) ReadLog(intf ...interface{}) (retVal interface{}) {
+	txn := tv.txp
 	if len(intf) == 2 {
-		return t.readSliceElem(intf[0], intf[1].(int))
+		return txn.readSliceElem(intf[0], intf[1].(int))
 	} else if len(intf) == 3 {
-		return t.readSlice(intf[0], intf[1].(int), intf[2].(int))
+		return txn.readSlice(intf[0], intf[1].(int), intf[2].(int))
 	} else if len(intf) != 1 {
 		panic("[undoTx] ReadLog: Incorrect number of args passed")
 	}
@@ -244,18 +249,19 @@ func (t *undoTx) readSlice(slicePtr interface{}, stIndex int,
 	return s.Slice(stIndex, endIndex).Interface()
 }
 
-func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
-	tail := t.v.tail
+func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
+	txn := tv.txp
+	tail := tv.tail
 	sizeBackup := size
 	srcU := uintptr(src)
-	tmpBuf := unsafe.Pointer(&t.v.tmpBuf[0])
+	tmpBuf := unsafe.Pointer(&tv.tmpBuf[0])
 
 	toAdd := int((size+16+63)/64) * 64
-	if tail+toAdd > cap(t.log) { // READS CACHELINE
-		t.increaseLogTail()
+	if tail+toAdd > cap(txn.log) { // READS CACHELINE
+		tv.increaseLogTail()
 	}
 
-	t.v.ptrArray = runtime.LogAddPtrs(uintptr(src), int(size), t.v.ptrArray)
+	tv.ptrArray = runtime.LogAddPtrs(uintptr(src), int(size), tv.ptrArray)
 
 	// TO DELETE
 	if uintptr(tmpBuf)%64 != 0 {
@@ -268,8 +274,8 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 	// copy 64 bytes at a time
 
 	szPtr := (*uintptr)(tmpBuf)
-	ptrPtr := (*uintptr)(unsafe.Pointer(&t.v.tmpBuf[8]))
-	dataPtr := unsafe.Pointer(&t.v.tmpBuf[16])
+	ptrPtr := (*uintptr)(unsafe.Pointer(&tv.tmpBuf[8]))
+	dataPtr := unsafe.Pointer(&tv.tmpBuf[16])
 
 	*szPtr = size
 	*ptrPtr = uintptr(src)
@@ -294,7 +300,7 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 			copy(destSlc, srcSlc)
 		}
 	*/
-	movnt(unsafe.Pointer(&t.log[tail]), tmpBuf, cacheSize)
+	movnt(unsafe.Pointer(&txn.log[tail]), tmpBuf, cacheSize)
 	/*if uintptr(unsafe.Pointer(&t.log[tail]))%cacheSize != 0 {
 		log.Fatal("Unaligned address 1")
 	}*/
@@ -306,8 +312,8 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 		srcSlc = (*(*[1 << 28]byte)(unsafe.Pointer(srcU)))[:cacheSize]
 		copy(destSlc, srcSlc)
 
-		movnt(unsafe.Pointer(&t.log[tail]), tmpBuf, cacheSize)
-		if uintptr(unsafe.Pointer(&t.log[tail]))%cacheSize != 0 {
+		movnt(unsafe.Pointer(&txn.log[tail]), tmpBuf, cacheSize)
+		if uintptr(unsafe.Pointer(&txn.log[tail]))%cacheSize != 0 {
 			log.Fatal("Unaligned address 2")
 		}
 		size -= cacheSize
@@ -331,38 +337,40 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 				log.Fatal("Invalid size")
 			}
 		*/
-		if uintptr(unsafe.Pointer(&t.log[tail]))%cacheSize != 0 {
+		if uintptr(unsafe.Pointer(&txn.log[tail]))%cacheSize != 0 {
 			log.Fatal("Unaligned address 3")
 		}
-		movnt(unsafe.Pointer(&t.log[tail]), tmpBuf, cacheSize)
+		movnt(unsafe.Pointer(&txn.log[tail]), tmpBuf, cacheSize)
 		tail += cacheSize
 	}
 
 	// Fence after movnt
 	runtime.Fence()
-	t.v.fs.insert(uintptr(src), sizeBackup)
+	tv.fs.insert(uintptr(src), sizeBackup)
 
 	//t.setTail(tail)
-	t.v.tail = tail
+	tv.tail = tail
 
 	return nil
 }
 
-func (t *undoTx) Log2(src, dst unsafe.Pointer, size uintptr) error {
-	tail := t.v.tail
+func (tv *vData) Log2(src, dst unsafe.Pointer, size uintptr) error {
+	txn := tv.txp
+	tail := tv.tail
 	// Append data to log entry.
 	movnt(dst, src, size)
-	movnt(unsafe.Pointer(&t.log[tail]), unsafe.Pointer(&entry{src, dst, int(size), 1}), unsafe.Sizeof(t.log[tail]))
+	movnt(unsafe.Pointer(&txn.log[tail]), unsafe.Pointer(&entry{src, dst, int(size), 1}), unsafe.Sizeof(txn.log[tail]))
 
 	// Fence after movnt
 	runtime.Fence()
-	t.v.fs.insert(uintptr(src), size)
-	t.increaseLogTail()
+	tv.fs.insert(uintptr(src), size)
+	tv.increaseLogTail()
 	return nil
 }
 
 // TODO: Logging slice of slice not supported
-func (t *undoTx) Log(intf ...interface{}) error {
+func (tv *vData) Log(intf ...interface{}) error {
+	//txn := tv.txp
 	doUpdate := false
 	if len(intf) == 2 { // If method is invoked with syntax Log(ptr, data),
 		// this method will do (*ptr = data) operation too
@@ -380,25 +388,25 @@ func (t *undoTx) Log(intf ...interface{}) error {
 	}
 	switch v1.Kind() {
 	case reflect.Slice:
-		t.logSlice(v1, true)
+		tv.logSlice(v1, true)
 	case reflect.Ptr:
-		tail := t.v.tail
+		tail := tv.tail
 		oldv := reflect.Indirect(v1) // get the underlying data of pointer
 		typ := oldv.Type()
 		if oldv.Kind() == reflect.Slice {
 			// record this log entry and store size of each slice element.
 			// Used later during End()
-			t.v.storeSliceHdr = append(t.v.storeSliceHdr, pair{tail, int(typ.Elem().Size())})
+			tv.storeSliceHdr = append(tv.storeSliceHdr, pair{tail, int(typ.Elem().Size())})
 		}
 		/* TODO
 		size := int(typ.Size())
 		v2 := reflect.PNew(oldv.Type())
 		reflect.Indirect(v2).Set(oldv) // copy old data
 			// Append data to log entry.
-			t.log[tail].ptr = unsafe.Pointer(v1.Pointer())  // point to orignal data
-			t.log[tail].data = unsafe.Pointer(v2.Pointer()) // point to logged copy
-			t.log[tail].genNum = 1
-			t.log[tail].size = size // size of data
+			txn.log[tail].ptr = unsafe.Pointer(v1.Pointer())  // point to orignal data
+			txn.log[tail].data = unsafe.Pointer(v2.Pointer()) // point to logged copy
+			txn.log[tail].genNum = 1
+			txn.log[tail].size = size // size of data
 
 			// Flush logged data copy and entry.
 			runtime.FlushRange(t.log[tail].data, uintptr(size))
@@ -406,11 +414,11 @@ func (t *undoTx) Log(intf ...interface{}) error {
 				unsafe.Sizeof(t.log[tail]))
 		*/
 		// Update log offset in header.
-		t.increaseLogTail()
+		tv.increaseLogTail()
 		if oldv.Kind() == reflect.Slice {
 			// Pointer to slice was passed to Log(). So, log slice elements too,
 			// but no need to flush these contents in End()
-			t.logSlice(oldv, false)
+			tv.logSlice(oldv, false)
 		}
 	default:
 		debug.PrintStack()
@@ -451,7 +459,7 @@ func updateVar(ptr, data reflect.Value) {
 	*sshdr = *dshdr
 }
 
-func (t *undoTx) logSlice(v1 reflect.Value, flushAtEnd bool) {
+func (tv *vData) logSlice(v1 reflect.Value, flushAtEnd bool) {
 	// Don't create log entries, if there is no slice, or slice is not in pmem
 	if v1.Pointer() == 0 || !runtime.InPmem(v1.Pointer()) {
 		return
@@ -471,10 +479,10 @@ func (t *undoTx) logSlice(v1 reflect.Value, flushAtEnd bool) {
 		copy(destPtr, sourcePtr)
 	}
 	tail := t.v.tail
-	t.log[tail].ptr = unsafe.Pointer(v1.Pointer())  // point to original data
-	t.log[tail].data = unsafe.Pointer(v2.Pointer()) // point to logged copy
-	t.log[tail].genNum = 1
-	t.log[tail].size = size // size of data
+	txn.log[tail].ptr = unsafe.Pointer(v1.Pointer())  // point to original data
+	txn.log[tail].data = unsafe.Pointer(v2.Pointer()) // point to logged copy
+	txn.log[tail].genNum = 1
+	txn.log[tail].size = size // size of data
 
 	if !flushAtEnd {
 		// This happens when sliceheader is logged. User can then update
@@ -482,16 +490,16 @@ func (t *undoTx) logSlice(v1 reflect.Value, flushAtEnd bool) {
 		// flushed in End(), new slice contents also must be flushed in End().
 		// So this log entry containing old slice contents don't have to be
 		// flushed in End(). Add this to list of entries to be skipped.
-		t.v.skipList = append(t.v.skipList, tail)
+		tv.skipList = append(tv.skipList, tail)
 	}
 
 		// Flush logged data copy and entry.
-		runtime.FlushRange(t.log[tail].data, uintptr(size))
-		runtime.FlushRange(unsafe.Pointer(&t.log[tail]),
-			unsafe.Sizeof(t.log[tail]))
+		runtime.FlushRange(txn.log[tail].data, uintptr(size))
+		runtime.FlushRange(unsafe.Pointer(&txn.log[tail]),
+			unsafe.Sizeof(txn.log[tail]))
 	*/
 	// Update log offset in header.
-	t.increaseLogTail()
+	tv.increaseLogTail()
 }
 
 /* Exec function receives a variable number of interfaces as its arguments.
@@ -501,7 +509,7 @@ func (t *undoTx) logSlice(v1 reflect.Value, flushAtEnd bool) {
  * Caveat: All locks within function fn_name(fn_arg1, fn_arg2, ...) should be
  * taken before making Exec() call. Locks should be released after Exec() call.
  */
-func (t *undoTx) Exec(intf ...interface{}) (retVal []reflect.Value, err error) {
+func (tv *vData) Exec(intf ...interface{}) (retVal []reflect.Value, err error) {
 	if len(intf) < 1 {
 		return retVal,
 			errors.New("[undoTx] Exec: Must have atleast one argument")
@@ -523,7 +531,7 @@ func (t *undoTx) Exec(intf ...interface{}) (retVal []reflect.Value, err error) {
 		if i == fnPosInInterfaceArgs {
 			// Add t *undoTx as the 1st argument to be passed to the function
 			// fn. This is not passed by the application when it calls Exec().
-			argv[i] = reflect.ValueOf(t)
+			argv[i] = reflect.ValueOf(tv)
 		} else {
 			// get the arguments to the function call from the call to Exec()
 			// and populate in argv
@@ -534,19 +542,19 @@ func (t *undoTx) Exec(intf ...interface{}) (retVal []reflect.Value, err error) {
 			argv[i] = reflect.ValueOf(intf[i])
 		}
 	}
-	t.Begin()
-	defer t.End()
-	txLevel := t.v.level
+	tv.Begin()
+	defer tv.End()
+	txLevel := tv.level
 	retVal = fn.Call(argv)
-	if txLevel != t.v.level {
+	if txLevel != tv.level {
 		return retVal, errors.New("[undoTx] Exec: Unbalanced Begin() & End() " +
 			"calls inside function passed to Exec")
 	}
 	return retVal, err
 }
 
-func (t *undoTx) Begin() error {
-	t.v.level++
+func (tv *vData) Begin() error {
+	tv.level++
 	return nil
 }
 
@@ -556,66 +564,70 @@ func (t *undoTx) Begin() error {
  * all application data is flushed to pmem. Returns a bool indicating if it
  * is safe to release the transaction handle.
  */
-func (t *undoTx) End() bool {
-	if t.v.level == 0 {
+func (tv *vData) End() bool {
+	if tv.level == 0 {
 		return true
 	}
-	t.v.level--
-	if t.v.level == 0 {
-		defer t.unLock()
-		t.v.fs.flushAndDestroy()
-		t.resetVData()
-		t.resetLogData(false) // discard all logs.
+	index := tv.index
+	txn := tv.txp
+
+	tv.level--
+	if tv.level == 0 {
+		defer tv.unLock()
+		tv.fs.flushAndDestroy()
+		resetVData(index)
+		txn.resetLogData(false) // discard all logs.
 		runtime.Fence()
 		return true
 	}
 	return false
 }
 
-func (t *undoTx) RLock(m *sync.RWMutex) {
+func (tv *vData) RLock(m *sync.RWMutex) {
 	m.RLock()
-	t.v.rlocks = append(t.v.rlocks, m)
+	tv.rlocks = append(tv.rlocks, m)
 }
 
-func (t *undoTx) WLock(m *sync.RWMutex) {
+func (tv *vData) WLock(m *sync.RWMutex) {
 	m.Lock()
-	t.v.wlocks = append(t.v.wlocks, m)
+	tv.wlocks = append(tv.wlocks, m)
 }
 
-func (t *undoTx) Lock(m *sync.RWMutex) {
-	t.WLock(m)
+func (tv *vData) Lock(m *sync.RWMutex) {
+	tv.WLock(m)
 }
 
-func (t *undoTx) unLock() {
-	for i, m := range t.v.wlocks {
+func (tv *vData) unLock() {
+	for i, m := range tv.wlocks {
 		m.Unlock()
-		t.v.wlocks[i] = nil
+		tv.wlocks[i] = nil
 	}
-	t.v.wlocks = t.v.wlocks[:0]
+	tv.wlocks = tv.wlocks[:0]
 
-	for i, m := range t.v.rlocks {
+	for i, m := range tv.rlocks {
 		m.RUnlock()
-		t.v.rlocks[i] = nil
+		tv.rlocks[i] = nil
 	}
-	t.v.rlocks = t.v.rlocks[:0]
+	tv.rlocks = tv.rlocks[:0]
 }
 
 // The realloc parameter indicates if the backing array for the log entries
 // need to be reallocated.
-func (t *undoTx) abort(realloc bool) error {
-	defer t.unLock()
+func (tv *vData) abort(realloc bool) error {
+	defer tv.unLock()
 	// Replay undo logs. Order last updates first, during abort
-	t.v.level = 0
+	tv.level = 0
+	txn := tv.txp
 
-	tail := t.v.tail
+	tail := tv.tail
 	off := 0
 
 	for tail > 0 {
-		size := *(*uintptr)(unsafe.Pointer(&t.log[off]))
-		origPtr := unsafe.Pointer(*(*uintptr)(unsafe.Pointer(&t.log[off+8])))
+		size := *(*uintptr)(unsafe.Pointer(&txn.log[off]))
+		origPtr := unsafe.Pointer(*(*uintptr)(unsafe.Pointer(&txn.log[off+8])))
 
 		origData := (*[maxInt]byte)(unsafe.Pointer(origPtr))
-		logData := (*[maxInt]byte)(unsafe.Pointer(&t.log[off+16]))
+		logData := (*[maxInt]byte)(unsafe.Pointer(&txn.log[off+16]))
 
 		copy(origData[:size], logData[:])
 		runtime.FlushRange(origPtr, size)
@@ -626,12 +638,18 @@ func (t *undoTx) abort(realloc bool) error {
 	}
 
 	runtime.Fence()
-	t.resetLogData(realloc)
-	t.resetVData()
+	txn.resetLogData(realloc)
+	resetVData(tv.index)
 	return nil
 }
 
-func (t *undoTx) resetVData() {
-	t.v = new(vData)
-	t.v.fs = new(flushSt)
+func resetVData(index int) {
+	txp := unsafe.Pointer(uintptr(0))
+	if tVData[index] != nil {
+		txp = unsafe.Pointer(tVData[index].txp)
+	}
+	tVData[index] = new(vData)
+	tVData[index].fs = new(flushSt)
+	tVData[index].index = index
+	tVData[index].txp = (*undoTx)(txp)
 }
