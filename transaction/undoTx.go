@@ -77,8 +77,8 @@ type (
 		wlocks   []*sync.RWMutex
 		fs       *flushSt
 		index    int
-		txp      *undoTx
-		junk     [32]byte //  to make tmpBuf cache aligned
+		txp      *uLogData // Would always be pointing to the newest struct
+		junk     [32]byte  //  to make tmpBuf cache aligned
 	}
 
 	undoTx struct {
@@ -86,9 +86,15 @@ type (
 		// Index of the log handle within undoArray
 	}
 
+	uLogData struct {
+		log   []byte // the third component of slice header is a pointer
+		first *uLogData
+		next  *uLogData
+	}
+
 	undoTxHeader struct {
 		magic  int
-		logPtr [logNum]*undoTx
+		logPtr [logNum]*uLogData // Should alwa
 	}
 )
 
@@ -146,10 +152,11 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 	return logHeadPtr
 }
 
-func _initUndoTx(size, index int) *undoTx {
-	tx := pnew(undoTx)
+func _initUndoTx(size, index int) *uLogData {
+	tx := pnew(uLogData)
 	tx.log = pmake([]byte, size)
-	runtime.PersistRange(unsafe.Pointer(&tx.log), unsafe.Sizeof(tx.log))
+	tx.first = tx
+	runtime.PersistRange(unsafe.Pointer(tx), 32)
 	resetVData(index)
 	return tx
 }
@@ -175,7 +182,10 @@ func (tv *vData) setTail(tail int) {
 
 // The realloc parameter indicates if the backing array for the log entries
 // need to be reallocated.
-func (t *undoTx) resetLogData(realloc bool) {
+func (tv *vData) resetLogData(realloc bool) {
+
+	// IF NEXT IS NOT NIL, THEN WE CAN JUST KEEP REUSING..
+	tv.txp = tv.txp.first
 
 	// TODO -- we are not trimming the log array
 
@@ -190,17 +200,37 @@ func (t *undoTx) resetLogData(realloc bool) {
 }
 
 // Also takes care of increasing the number of entries underlying log can hold
-func (tv *vData) increaseLogTail() {
+func (tv *vData) increaseLogTail(toAdd int) {
 	txn := tv.txp
-	//println("tv ", unsafe.Pointer(tv), " increasing from ", cap(txn.log), " to ", 2*cap(txn.log))
-	newE := 4 * cap(txn.log) // Double number of entries which can be stored
-	newLog := pmake([]byte, newE)
-	copy(newLog, txn.log)
-	runtime.PersistRange(unsafe.Pointer(&newLog[0]),
-		uintptr(newE)*unsafe.Sizeof(newLog[0])) // Persist new log
-	txn.log = newLog
-	runtime.PersistRange(unsafe.Pointer(&txn.log), unsafe.Sizeof(txn.log))
 
+	// We need at least toAdd bytes and current buffer do not have that much
+	// space available.
+	newCap := cap(txn.log) * 2
+	if toAdd > newCap {
+		// make sure newCap is a multiple of 64
+		newCap = (64 * (toAdd + 63) / 64)
+	}
+
+	if txn.next != nil {
+		nextLog := txn.next
+		if cap(nextLog.log) >= newCap {
+			tv.txp = nextLog
+			tv.tail = 0
+			return
+		}
+	}
+
+	//println("tv ", unsafe.Pointer(tv), " increasing from ", cap(txn.log), " to ", 2*cap(txn.log))
+
+	newLog := pnew(uLogData)
+	newLog.log = pmake([]byte, newCap)
+	newLog.first = txn.first
+	runtime.PersistRange(unsafe.Pointer(newLog), 32)
+
+	txn.next = newLog
+	runtime.PersistRange(unsafe.Pointer(&txn.next), 8)
+	tv.txp = newLog
+	tv.tail = 0
 }
 
 type value struct {
@@ -217,11 +247,13 @@ type sliceHeader struct {
 }
 
 func (tv *vData) ReadLog(intf ...interface{}) (retVal interface{}) {
-	txn := tv.txp
+	//txn := tv.txp
 	if len(intf) == 2 {
-		return txn.readSliceElem(intf[0], intf[1].(int))
+		return nil
+		//return txn.readSliceElem(intf[0], intf[1].(int))
 	} else if len(intf) == 3 {
-		return txn.readSlice(intf[0], intf[1].(int), intf[2].(int))
+		return nil
+		//return txn.readSlice(intf[0], intf[1].(int), intf[2].(int))
 	} else if len(intf) != 1 {
 		panic("[undoTx] ReadLog: Incorrect number of args passed")
 	}
@@ -258,7 +290,8 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 
 	toAdd := int((size+16+63)/64) * 64
 	if tail+toAdd > cap(txn.log) { // READS CACHELINE
-		tv.increaseLogTail()
+		tv.increaseLogTail(toAdd)
+		txn = tv.txp
 	}
 
 	tv.ptrArray = runtime.LogAddPtrs(uintptr(src), int(size), tv.ptrArray)
@@ -355,6 +388,7 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 }
 
 func (tv *vData) Log2(src, dst unsafe.Pointer, size uintptr) error {
+	log.Fatal("Log2() not implemented")
 	txn := tv.txp
 	tail := tv.tail
 	// Append data to log entry.
@@ -364,12 +398,13 @@ func (tv *vData) Log2(src, dst unsafe.Pointer, size uintptr) error {
 	// Fence after movnt
 	runtime.Fence()
 	tv.fs.insert(uintptr(src), size)
-	tv.increaseLogTail()
+	tv.increaseLogTail(0)
 	return nil
 }
 
 // TODO: Logging slice of slice not supported
 func (tv *vData) Log(intf ...interface{}) error {
+	log.Fatal("Log() not implemented")
 	//txn := tv.txp
 	doUpdate := false
 	if len(intf) == 2 { // If method is invoked with syntax Log(ptr, data),
@@ -414,7 +449,7 @@ func (tv *vData) Log(intf ...interface{}) error {
 				unsafe.Sizeof(t.log[tail]))
 		*/
 		// Update log offset in header.
-		tv.increaseLogTail()
+		tv.increaseLogTail(0)
 		if oldv.Kind() == reflect.Slice {
 			// Pointer to slice was passed to Log(). So, log slice elements too,
 			// but no need to flush these contents in End()
@@ -499,7 +534,7 @@ func (tv *vData) logSlice(v1 reflect.Value, flushAtEnd bool) {
 			unsafe.Sizeof(txn.log[tail]))
 	*/
 	// Update log offset in header.
-	tv.increaseLogTail()
+	tv.increaseLogTail(0)
 }
 
 /* Exec function receives a variable number of interfaces as its arguments.
@@ -569,14 +604,14 @@ func (tv *vData) End() bool {
 		return true
 	}
 	index := tv.index
-	txn := tv.txp
+	//txn := tv.txp
 
 	tv.level--
 	if tv.level == 0 {
 		defer tv.unLock()
 		tv.fs.flushAndDestroy()
 		resetVData(index)
-		txn.resetLogData(false) // discard all logs.
+		tv.resetLogData(false) // discard all logs.
 		runtime.Fence()
 		return true
 	}
@@ -622,6 +657,9 @@ func (tv *vData) abort(realloc bool) error {
 	tail := tv.tail
 	off := 0
 
+	// TODO.. The tail may not be set correctly if coming from a reset path?
+	// TODO HOW TO KNOW WHEN NO MORE SPACE..
+
 	for tail > 0 {
 		size := *(*uintptr)(unsafe.Pointer(&txn.log[off]))
 		origPtr := unsafe.Pointer(*(*uintptr)(unsafe.Pointer(&txn.log[off+8])))
@@ -638,7 +676,7 @@ func (tv *vData) abort(realloc bool) error {
 	}
 
 	runtime.Fence()
-	txn.resetLogData(realloc)
+	tv.resetLogData(realloc)
 	resetVData(tv.index)
 	return nil
 }
@@ -649,7 +687,7 @@ func resetVData(index int) {
 		tVData[index].index = index
 		//return
 	}
-	tVData[index].ptrArray = tVData[index].ptrArray[:0]
+	tVData[index].ptrArray = tVData[index].ptrArray[:0] // TODO -- WILL KEEP DATA ALIVE
 	tVData[index].fs = new(flushSt)
 	tVData[index].tail = 0
 }
