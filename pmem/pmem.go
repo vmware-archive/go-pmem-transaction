@@ -117,7 +117,7 @@ func Make(name string, intf ...interface{}) interface{} {
 	tx := transaction.NewUndoTx()
 	m.Lock()
 	tx.Begin()
-	tx.Log(&rootPtr.appData) // add to root pointer
+	tx.Log3(unsafe.Pointer(&rootPtr.appData), 24) // add to root pointer
 	rootPtr.appData = append(rootPtr.appData, newNamedObj)
 	tx.End()
 	m.Unlock()
@@ -156,7 +156,7 @@ func New(name string, intf interface{}) unsafe.Pointer {
 	tx := transaction.NewUndoTx()
 	m.Lock()
 	tx.Begin()
-	tx.Log(&rootPtr.appData) // add to root pointer
+	tx.Log3(unsafe.Pointer(&rootPtr.appData), 24) // add to root pointer
 	rootPtr.appData = append(rootPtr.appData, newNamedObj)
 	tx.End()
 	m.Unlock()
@@ -175,7 +175,7 @@ func Delete(name string) error {
 	}
 	tx := transaction.NewUndoTx()
 	tx.Begin()
-	tx.Log(&rootPtr.appData)
+	tx.Log3(unsafe.Pointer(&rootPtr.appData), 24)
 	rootPtr.appData = append(rootPtr.appData[:i], rootPtr.appData[i+1:]...)
 	tx.End()
 	transaction.Release(tx)
