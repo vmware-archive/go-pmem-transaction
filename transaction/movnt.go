@@ -3,6 +3,7 @@ package transaction
 
 import (
 	"fmt"
+	"log"
 	"runtime"
 	"unsafe"
 )
@@ -10,6 +11,12 @@ import (
 func movnt128b(dst, src uintptr)
 func movnt64b(dst, src uintptr)
 func movnt32b(dst, src uintptr)
+
+func movnt4x64b(dest, src uintptr)
+
+func MOVNT(dst, src unsafe.Pointer, len uintptr) {
+	movnt(dst, src, len)
+}
 
 // issue clwb, but no fence
 func memmove_small_clwb(dst, src, len uintptr) {
@@ -51,23 +58,26 @@ func memmove_small(dst, src, len uintptr) {
 func movnt(dst0, src0 unsafe.Pointer, len uintptr) {
 	dst := uintptr(dst0)
 	src := uintptr(src0)
-	if len <= 15 {
-		memmove_small(dst, src, len)
-		return
+
+	if len%64 != 0 {
+		log.Fatal("Movnt optimized only for 64 byte moves")
 	}
 
-	align := dst & 15 // Make sure we start with 16B align
-	if align > 0 {
-		memmove_small(dst, src, align)
-		dst += align
-		src += align
-		len -= align
+	if dst&63 != 0 || src&63 != 0 {
+		log.Fatal("dst or src not 64-byte aligned")
 	}
-	for len >= 16 {
+
+	for len >= 256 {
+		movnt4x64b(dst, src)
+		dst += 256
+		src += 256
+		len -= 256
+	}
+
+	for len > 0 {
 		movnt128b(dst, src)
 		dst += 16
 		src += 16
 		len -= 16
 	}
-	memmove_small(dst, src, len)
 }
