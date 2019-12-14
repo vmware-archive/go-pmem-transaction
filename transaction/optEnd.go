@@ -25,7 +25,7 @@ func (f *flushSt) insert(start, size uintptr) {
 	//return
 
 	//if f.data.Get(alignedAddr) {
-		//	return // already exists
+	//	return // already exists
 	//}
 	// We only care about cacheline aligned addresses
 	for alignedAddr < start+size {
@@ -39,13 +39,14 @@ func (f *flushSt) flushAndDestroy() {
 	if f.data != nil {
 		//flushRbTree(f.data.Root)
 		flushRbTreeMap(f.data)
+		runtime.Fence()
 		f.data = nil
 	}
 }
 
 func flushRbTreeMap(m map[uintptr]int) {
-	for k,_ := range m {
-		runtime.FlushRange(unsafe.Pointer(k), cacheLineSz)	
+	for k, _ := range m {
+		runtime.FlushRange(unsafe.Pointer(k), cacheLineSz)
 	}
 }
 

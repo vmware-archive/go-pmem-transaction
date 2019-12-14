@@ -57,8 +57,9 @@ type (
 	// Volatile metadata associated with each transaction handle. These are
 	// helpful in the common case when transaction ends successfully.
 	vData struct {
-		tmpBuf   [64]byte         // cacheline sized and aligned buffer
+		tmpBuf   [128]byte        // cacheline sized and aligned buffer
 		ptrArray []unsafe.Pointer // all pointers within this handle
+		genNum   uintptr          // A volatile copy of the generation number
 
 		// tail position of the log where new data would be stored
 		tail int
@@ -68,33 +69,36 @@ type (
 
 		// record which log entries store sliceheader, and store the size of
 		// each element in that slice.
-		storeSliceHdr []pair
+		//storeSliceHdr []pair
+
+		handle *uLogHandle
+		txp    *uLogData // Would always be pointing to the newest struct
 
 		// list of log entries which need not be flushed during transaction's
 		// successful end.
-		skipList []int
+		//skipList []int
 		rlocks   []*sync.RWMutex
 		wlocks   []*sync.RWMutex
-		fs       *flushSt
-		index    int
-		txp      *uLogData // Would always be pointing to the newest struct
-		junk     [32]byte  //  to make tmpBuf cache aligned
+		fs       flushSt
 	}
 
 	undoTx struct {
 		log []byte
-		// Index of the log handle within undoArray
+	}
+
+	uLogHandle struct {
+		genNum uintptr // Current active generation number
+		data   *uLogData
 	}
 
 	uLogData struct {
-		log   []byte // the third component of slice header is a pointer
-		first *uLogData
-		next  *uLogData
+		log  []byte // the third component of slice header is a pointer
+		next *uLogData
 	}
 
 	undoTxHeader struct {
-		magic  int
-		logPtr [logNum]*uLogData // Should alwa
+		magic     int
+		logHandle [logNum]uLogHandle
 	}
 )
 
@@ -102,12 +106,34 @@ var (
 	txHeaderPtr *undoTxHeader
 	undoArray   *bitmap
 	zeroes      [64]byte // Go guarantees that variables will be zeroed out
-	tVData      [logNum]*vData
+	junkVal     [32]byte
+	tVData      [logNum]vData
 )
 
 const (
 	undoLogInitSize = 65536
+	// Header data size before every undo log entry. Each undo log entry header
+	// has the layout shown below, and occupies 24 bytes.
+	// +--------+------+---------+-----------+
+	// | genNum | size | Pointer | Data .... |
+	// |   8    |   8  |    8    | var size  |
+	// +--------+------+---------+-----------+
+	//
+	undoLogHdrSize = 24
 )
+
+/*
+func init() {
+	println("tvdata allocated at ", unsafe.Pointer(&tVData[0]))
+	println("size of one tvdata = ", unsafe.Sizeof(tVData[0]))
+	println("Total size of tvdata = ", unsafe.Sizeof(tVData)*logNum)
+	println("for each vdata, its tmpbuf align is : ")
+	for i := 0; i < logNum; i++ {
+		print(uintptr(unsafe.Pointer(&tVData[i].tmpBuf[0]))%64, " ")
+	}
+	println(" ")
+}
+*/
 
 /* Does the first time initialization, else restores log structure and
  * reverts uncommitted logs. Does not do any pointer swizzle. This will be
@@ -119,15 +145,11 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 	if logHeadPtr == nil {
 		// First time initialization
 		txHeaderPtr = pnew(undoTxHeader)
-		for i := 0; i < logNum; i++ {
-			ptr := _initUndoTx(undoLogInitSize, i)
-			txHeaderPtr.logPtr[i] = ptr
-			tVData[i].txp = ptr
-		}
+		initUndoHandles()
+
 		// Write the magic constant after the transaction handles are persisted.
 		// NewUndoTx() can then check this constant to ensure all tx handles
 		// are properly initialized before releasing any.
-		runtime.PersistRange(unsafe.Pointer(&txHeaderPtr.logPtr), logNum*ptrSize)
 		txHeaderPtr.magic = magic
 		runtime.PersistRange(unsafe.Pointer(&txHeaderPtr.magic), ptrSize)
 		logHeadPtr = unsafe.Pointer(txHeaderPtr)
@@ -139,26 +161,30 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 
 		// Recover data from previous pending transactions, if any
 		for i := 0; i < logNum; i++ {
-			tx := txHeaderPtr.logPtr[i]
-			tVData[i] = new(vData)
-			tVData[i].txp = tx
-			tVData[i].index = i
+			handle := &txHeaderPtr.logHandle[i]
+			tVData[i].handle = handle
+			tVData[i].genNum = handle.genNum
 			// Reallocate the array for the log entries. TODO: How does this
 			// change with tail not in pmem?
 			tVData[i].abort(true)
 		}
 	}
-
 	return logHeadPtr
 }
 
-func _initUndoTx(size, index int) *uLogData {
-	tx := pnew(uLogData)
-	tx.log = pmake([]byte, size)
-	tx.first = tx
-	runtime.PersistRange(unsafe.Pointer(tx), 32)
-	resetVData(index)
-	return tx
+func initUndoHandles() {
+	for i := 0; i < logNum; i++ {
+		handle := &txHeaderPtr.logHandle[i]
+		handle.genNum = 1
+		handle.data = pnew(uLogData)
+		handle.data.log = pmake([]byte, undoLogInitSize)
+		runtime.FlushRange(unsafe.Pointer(&handle.data.log), 24)
+		tVData[i].handle = handle
+		tVData[i].txp = handle.data
+		tVData[i].genNum = 1
+	}
+	runtime.PersistRange(unsafe.Pointer(&txHeaderPtr.logHandle),
+		logNum*unsafe.Sizeof(txHeaderPtr.logHandle[0]))
 }
 
 func NewUndoTx() TX {
@@ -166,14 +192,16 @@ func NewUndoTx() TX {
 		log.Fatal("Undo log not correctly initialized!")
 	}
 	index := undoArray.nextAvailable()
-	return tVData[index]
+	return &tVData[index]
 }
 
 func releaseUndoTx(tv *vData) {
 	// Reset the pointers in the log entries, but need not allocate a new
 	// backing array
 	tv.abort(false)
-	undoArray.clearBit(tv.index)
+	index := (uintptr(unsafe.Pointer(tv)) - uintptr(unsafe.Pointer(&tVData[0]))) /
+		unsafe.Sizeof(tVData[0])
+	undoArray.clearBit(int(index))
 }
 
 func (tv *vData) setTail(tail int) {
@@ -185,9 +213,28 @@ func (tv *vData) setTail(tail int) {
 func (tv *vData) resetLogData(realloc bool) {
 
 	// IF NEXT IS NOT NIL, THEN WE CAN JUST KEEP REUSING..
-	tv.txp = tv.txp.first
+	tv.txp = tv.handle.data
+
+	// Zero out ptrArray
+	///*
+		len := len(tv.ptrArray)
+		src := (*(*[maxInt]byte)(unsafe.Pointer(&zeroes[0])))[:]
+		zeroed := 0
+		for len > 0 {
+			sz := 8 // 8 pointers = 64 bytes
+			if len < 8 {
+				sz = len
+			}
+			dest := (*(*[maxInt]byte)(unsafe.Pointer(&tv.ptrArray[zeroed])))[:sz]
+			copy(dest, src)
+			len -= sz
+			zeroed += sz
+		}
+		tv.ptrArray = tv.ptrArray[:0]
+	// */
 
 	// TODO -- we are not trimming the log array
+	tv.tail = 0
 
 	if realloc {
 		// Allocate a new backing array if realloc is true. After a program
@@ -201,18 +248,18 @@ func (tv *vData) resetLogData(realloc bool) {
 
 // Also takes care of increasing the number of entries underlying log can hold
 func (tv *vData) increaseLogTail(toAdd int) {
-	txn := tv.txp
+	txn0 := tv.txp
 
 	// We need at least toAdd bytes and current buffer do not have that much
 	// space available.
-	newCap := cap(txn.log) * 2
+	newCap := cap(txn0.log) * 2
 	if toAdd > newCap {
 		// make sure newCap is a multiple of 64
 		newCap = (64 * (toAdd + 63) / 64)
 	}
 
-	if txn.next != nil {
-		nextLog := txn.next
+	if txn0.next != nil {
+		nextLog := txn0.next
 		if cap(nextLog.log) >= newCap {
 			tv.txp = nextLog
 			tv.tail = 0
@@ -220,15 +267,14 @@ func (tv *vData) increaseLogTail(toAdd int) {
 		}
 	}
 
-	//println("tv ", unsafe.Pointer(tv), " increasing from ", cap(txn.log), " to ", 2*cap(txn.log))
+	//println("tv ", unsafe.Pointer(tv), " increasing from ", cap(txn0.log), " to ", 2*cap(txn0.log))
 
 	newLog := pnew(uLogData)
 	newLog.log = pmake([]byte, newCap)
-	newLog.first = txn.first
-	runtime.PersistRange(unsafe.Pointer(newLog), 32)
+	runtime.PersistRange(unsafe.Pointer(newLog), 24)
 
-	txn.next = newLog
-	runtime.PersistRange(unsafe.Pointer(&txn.next), 8)
+	txn0.next = newLog
+	runtime.PersistRange(unsafe.Pointer(&txn0.next), 8)
 	tv.txp = newLog
 	tv.tail = 0
 }
@@ -247,13 +293,13 @@ type sliceHeader struct {
 }
 
 func (tv *vData) ReadLog(intf ...interface{}) (retVal interface{}) {
-	//txn := tv.txp
+	//txn0 := tv.txp
 	if len(intf) == 2 {
 		return nil
-		//return txn.readSliceElem(intf[0], intf[1].(int))
+		//return txn0.readSliceElem(intf[0], intf[1].(int))
 	} else if len(intf) == 3 {
 		return nil
-		//return txn.readSlice(intf[0], intf[1].(int), intf[2].(int))
+		//return txn0.readSlice(intf[0], intf[1].(int), intf[2].(int))
 	} else if len(intf) != 1 {
 		panic("[undoTx] ReadLog: Incorrect number of args passed")
 	}
@@ -282,23 +328,33 @@ func (t *undoTx) readSlice(slicePtr interface{}, stIndex int,
 }
 
 func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
-	txn := tv.txp
+	txn0 := tv.txp
 	tail := tv.tail
 	sizeBackup := size
 	srcU := uintptr(src)
 	tmpBuf := unsafe.Pointer(&tv.tmpBuf[0])
 
-	toAdd := int((size+16+63)/64) * 64
-	if tail+toAdd > cap(txn.log) { // READS CACHELINE
+	// Number of bytes we need to log this entry. It is size + undoLogHdrSize,
+	// rounded up to cache line size
+	toAdd := int((size+undoLogHdrSize+63)/cacheSize) * cacheSize
+	if tail+toAdd > cap(txn0.log) { // READS CACHELINE
 		tv.increaseLogTail(toAdd)
-		txn = tv.txp
+		txn0 = tv.txp
 	}
 
+	// Create a volatile copy of all pointers in this object. LogAddPtrs() also
+	// adds `src` to the list of pointers because we want to keep the object
+	// pointer by `src` alive as well.
 	tv.ptrArray = runtime.LogAddPtrs(uintptr(src), int(size), tv.ptrArray)
 
 	// TO DELETE
-	if uintptr(tmpBuf)%64 != 0 {
-		println("tmp array address = ", tmpBuf)
+	diff := uintptr(tmpBuf) % cacheSize
+	if diff != 0 {
+		diff = cacheSize - diff
+		tmpBuf = unsafe.Pointer(&tv.tmpBuf[diff])
+	}
+	if uintptr(tmpBuf)%cacheSize != 0 {
+		println("tmp array address = ", tmpBuf, " size = ", unsafe.Sizeof(vData{}))
 		log.Fatal("tmp array is not cache aligned!")
 	}
 
@@ -306,20 +362,22 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 
 	// copy 64 bytes at a time
 
-	szPtr := (*uintptr)(tmpBuf)
-	ptrPtr := (*uintptr)(unsafe.Pointer(&tv.tmpBuf[8]))
-	dataPtr := unsafe.Pointer(&tv.tmpBuf[16])
+	genPtr := (*uintptr)(tmpBuf)
+	szPtr := (*uintptr)(unsafe.Pointer(&tv.tmpBuf[8]))
+	origPtr := (*uintptr)(unsafe.Pointer(&tv.tmpBuf[16]))
+	dataPtr := unsafe.Pointer(&tv.tmpBuf[24])
 
+	*genPtr = tv.genNum
 	*szPtr = size
-	*ptrPtr = uintptr(src)
-	sz := uintptr(cacheSize - 16)
+	*origPtr = uintptr(src)
+	sz := uintptr(cacheSize - undoLogHdrSize)
 	if size < sz {
 		sz = size
 	}
 
 	// copy the first sz bytes
-	destSlc := (*(*[1 << 28]byte)(dataPtr))[:sz]
-	srcSlc := (*(*[1 << 28]byte)(unsafe.Pointer(srcU)))[:sz]
+	destSlc := (*(*[maxInt]byte)(dataPtr))[:sz]
+	srcSlc := (*(*[maxInt]byte)(unsafe.Pointer(srcU)))[:sz]
 	copy(destSlc, srcSlc)
 	srcU += sz
 	size -= sz
@@ -328,12 +386,12 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 	/*
 		rem := cacheSize - sz - 16
 		if rem {
-			destSlc = (*(*[1 << 28]byte)(dataPtr))[:]
-			srcSlc = (*(*[1 << 28]byte)(unsafe.Pointer(&zeroes[0])))[:rem]
+			destSlc = (*(*[maxInt]byte)(dataPtr))[:]
+			srcSlc = (*(*[maxInt]byte)(unsafe.Pointer(&zeroes[0])))[:rem]
 			copy(destSlc, srcSlc)
 		}
 	*/
-	movnt(unsafe.Pointer(&txn.log[tail]), tmpBuf, cacheSize)
+	movnt(unsafe.Pointer(&txn0.log[tail]), tmpBuf, cacheSize)
 	/*if uintptr(unsafe.Pointer(&t.log[tail]))%cacheSize != 0 {
 		log.Fatal("Unaligned address 1")
 	}*/
@@ -341,12 +399,12 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 
 	// Copy remaining 64 byte aligned entries
 	for size >= cacheSize {
-		destSlc = (*(*[1 << 28]byte)(tmpBuf))[:]
-		srcSlc = (*(*[1 << 28]byte)(unsafe.Pointer(srcU)))[:cacheSize]
+		destSlc = (*(*[maxInt]byte)(tmpBuf))[:]
+		srcSlc = (*(*[maxInt]byte)(unsafe.Pointer(srcU)))[:cacheSize]
 		copy(destSlc, srcSlc)
 
-		movnt(unsafe.Pointer(&txn.log[tail]), tmpBuf, cacheSize)
-		if uintptr(unsafe.Pointer(&txn.log[tail]))%cacheSize != 0 {
+		movnt(unsafe.Pointer(&txn0.log[tail]), tmpBuf, cacheSize)
+		if uintptr(unsafe.Pointer(&txn0.log[tail]))%cacheSize != 0 {
 			log.Fatal("Unaligned address 2")
 		}
 		size -= cacheSize
@@ -360,8 +418,8 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 		log.Fatal("Invalid size")
 	}*/
 	if sz > 0 {
-		destSlc = (*(*[1 << 28]byte)(tmpBuf))[:]
-		srcSlc = (*(*[1 << 28]byte)(unsafe.Pointer(srcU)))[:sz]
+		destSlc = (*(*[maxInt]byte)(tmpBuf))[:]
+		srcSlc = (*(*[maxInt]byte)(unsafe.Pointer(srcU)))[:sz]
 		copy(destSlc, srcSlc)
 
 		/*
@@ -370,10 +428,10 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 				log.Fatal("Invalid size")
 			}
 		*/
-		if uintptr(unsafe.Pointer(&txn.log[tail]))%cacheSize != 0 {
+		if uintptr(unsafe.Pointer(&txn0.log[tail]))%cacheSize != 0 {
 			log.Fatal("Unaligned address 3")
 		}
-		movnt(unsafe.Pointer(&txn.log[tail]), tmpBuf, cacheSize)
+		movnt(unsafe.Pointer(&txn0.log[tail]), tmpBuf, cacheSize)
 		tail += cacheSize
 	}
 
@@ -381,7 +439,6 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 	runtime.Fence()
 	tv.fs.insert(uintptr(src), sizeBackup)
 
-	//t.setTail(tail)
 	tv.tail = tail
 
 	return nil
@@ -389,11 +446,11 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 
 func (tv *vData) Log2(src, dst unsafe.Pointer, size uintptr) error {
 	log.Fatal("Log2() not implemented")
-	txn := tv.txp
+	txn0 := tv.txp
 	tail := tv.tail
 	// Append data to log entry.
 	movnt(dst, src, size)
-	movnt(unsafe.Pointer(&txn.log[tail]), unsafe.Pointer(&entry{src, dst, int(size), 1}), unsafe.Sizeof(txn.log[tail]))
+	movnt(unsafe.Pointer(&txn0.log[tail]), unsafe.Pointer(&entry{src, dst, int(size), 1}), unsafe.Sizeof(txn0.log[tail]))
 
 	// Fence after movnt
 	runtime.Fence()
@@ -405,7 +462,7 @@ func (tv *vData) Log2(src, dst unsafe.Pointer, size uintptr) error {
 // TODO: Logging slice of slice not supported
 func (tv *vData) Log(intf ...interface{}) error {
 	log.Fatal("Log() not implemented")
-	//txn := tv.txp
+	//txn0 := tv.txp
 	doUpdate := false
 	if len(intf) == 2 { // If method is invoked with syntax Log(ptr, data),
 		// this method will do (*ptr = data) operation too
@@ -425,23 +482,23 @@ func (tv *vData) Log(intf ...interface{}) error {
 	case reflect.Slice:
 		tv.logSlice(v1, true)
 	case reflect.Ptr:
-		tail := tv.tail
+		//tail := tv.tail
 		oldv := reflect.Indirect(v1) // get the underlying data of pointer
-		typ := oldv.Type()
+		//typ := oldv.Type()
 		if oldv.Kind() == reflect.Slice {
 			// record this log entry and store size of each slice element.
 			// Used later during End()
-			tv.storeSliceHdr = append(tv.storeSliceHdr, pair{tail, int(typ.Elem().Size())})
+			//tv.storeSliceHdr = append(tv.storeSliceHdr, pair{tail, int(typ.Elem().Size())})
 		}
 		/* TODO
 		size := int(typ.Size())
 		v2 := reflect.PNew(oldv.Type())
 		reflect.Indirect(v2).Set(oldv) // copy old data
 			// Append data to log entry.
-			txn.log[tail].ptr = unsafe.Pointer(v1.Pointer())  // point to orignal data
-			txn.log[tail].data = unsafe.Pointer(v2.Pointer()) // point to logged copy
-			txn.log[tail].genNum = 1
-			txn.log[tail].size = size // size of data
+			txn0.log[tail].ptr = unsafe.Pointer(v1.Pointer())  // point to orignal data
+			txn0.log[tail].data = unsafe.Pointer(v2.Pointer()) // point to logged copy
+			txn0.log[tail].genNum = 1
+			txn0.log[tail].size = size // size of data
 
 			// Flush logged data copy and entry.
 			runtime.FlushRange(t.log[tail].data, uintptr(size))
@@ -514,10 +571,10 @@ func (tv *vData) logSlice(v1 reflect.Value, flushAtEnd bool) {
 		copy(destPtr, sourcePtr)
 	}
 	tail := t.v.tail
-	txn.log[tail].ptr = unsafe.Pointer(v1.Pointer())  // point to original data
-	txn.log[tail].data = unsafe.Pointer(v2.Pointer()) // point to logged copy
-	txn.log[tail].genNum = 1
-	txn.log[tail].size = size // size of data
+	txn0.log[tail].ptr = unsafe.Pointer(v1.Pointer())  // point to original data
+	txn0.log[tail].data = unsafe.Pointer(v2.Pointer()) // point to logged copy
+	txn0.log[tail].genNum = 1
+	txn0.log[tail].size = size // size of data
 
 	if !flushAtEnd {
 		// This happens when sliceheader is logged. User can then update
@@ -529,9 +586,9 @@ func (tv *vData) logSlice(v1 reflect.Value, flushAtEnd bool) {
 	}
 
 		// Flush logged data copy and entry.
-		runtime.FlushRange(txn.log[tail].data, uintptr(size))
-		runtime.FlushRange(unsafe.Pointer(&txn.log[tail]),
-			unsafe.Sizeof(txn.log[tail]))
+		runtime.FlushRange(txn0.log[tail].data, uintptr(size))
+		runtime.FlushRange(unsafe.Pointer(&txn0.log[tail]),
+			unsafe.Sizeof(txn0.log[tail]))
 	*/
 	// Update log offset in header.
 	tv.increaseLogTail(0)
@@ -603,16 +660,17 @@ func (tv *vData) End() bool {
 	if tv.level == 0 {
 		return true
 	}
-	index := tv.index
-	//txn := tv.txp
 
 	tv.level--
 	if tv.level == 0 {
 		defer tv.unLock()
 		tv.fs.flushAndDestroy()
-		resetVData(index)
+
+		tv.genNum++
+		tv.handle.genNum = tv.genNum
+		runtime.PersistRange(unsafe.Pointer(&tv.handle.genNum), 8)
+		// Can also zero out the volatile pointers here (tv.ptrArray)
 		tv.resetLogData(false) // discard all logs.
-		runtime.Fence()
 		return true
 	}
 	return false
@@ -652,42 +710,39 @@ func (tv *vData) abort(realloc bool) error {
 	defer tv.unLock()
 	// Replay undo logs. Order last updates first, during abort
 	tv.level = 0
-	txn := tv.txp
-
-	tail := tv.tail
-	off := 0
+	txn0 := tv.handle.data // CHECK
 
 	// TODO.. The tail may not be set correctly if coming from a reset path?
 	// TODO HOW TO KNOW WHEN NO MORE SPACE..
+	if false {
+		for txn0 != nil {
+			off := 0
+			for off < len(txn0.log) {
+				logBuf := unsafe.Pointer(&txn0.log[off])
+				genPtr := (*uintptr)(logBuf)
+				if *genPtr != tv.genNum {
+					break
+				}
+				size := *(*uintptr)(unsafe.Pointer(&txn0.log[off+8]))
+				origPtr := *(*uintptr)(unsafe.Pointer(&txn0.log[off+16]))
+				dataPtr := unsafe.Pointer(&txn0.log[off+24])
 
-	for tail > 0 {
-		size := *(*uintptr)(unsafe.Pointer(&txn.log[off]))
-		origPtr := unsafe.Pointer(*(*uintptr)(unsafe.Pointer(&txn.log[off+8])))
+				origData := (*[maxInt]byte)(unsafe.Pointer(origPtr))
+				logData := (*[maxInt]byte)(dataPtr)
 
-		origData := (*[maxInt]byte)(unsafe.Pointer(origPtr))
-		logData := (*[maxInt]byte)(unsafe.Pointer(&txn.log[off+16]))
+				copy(origData[:size], logData[:])
+				runtime.FlushRange(unsafe.Pointer(origPtr), size)
 
-		copy(origData[:size], logData[:])
-		runtime.FlushRange(origPtr, size)
-
-		toAdd := int((size+16+63)/64) * 64
-		tail -= toAdd
-		off += toAdd
+				toAdd := int((size+undoLogHdrSize+63)/64) * 64
+				off += toAdd
+			}
+			txn0 = txn0.next
+		}
+		runtime.Fence()
 	}
-
-	runtime.Fence()
+	tv.handle.genNum++
+	runtime.PersistRange(unsafe.Pointer(&tv.handle.genNum), 8)
+	tv.genNum = tv.handle.genNum
 	tv.resetLogData(realloc)
-	resetVData(tv.index)
 	return nil
-}
-
-func resetVData(index int) {
-	if tVData[index] == nil {
-		tVData[index] = new(vData)
-		tVData[index].index = index
-		//return
-	}
-	tVData[index].ptrArray = tVData[index].ptrArray[:0] // TODO -- WILL KEEP DATA ALIVE
-	tVData[index].fs = new(flushSt)
-	tVData[index].tail = 0
 }
