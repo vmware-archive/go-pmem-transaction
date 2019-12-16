@@ -351,9 +351,9 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 	// copy 64 bytes at a time
 
 	genPtr := (*uintptr)(tmpBuf)
-	szPtr := (*uintptr)(unsafe.Pointer(&tv.tmpBuf[8]))
-	origPtr := (*uintptr)(unsafe.Pointer(&tv.tmpBuf[16]))
-	dataPtr := unsafe.Pointer(&tv.tmpBuf[24])
+	szPtr := (*uintptr)(unsafe.Pointer(&tv.tmpBuf[diff+8]))
+	origPtr := (*uintptr)(unsafe.Pointer(&tv.tmpBuf[diff+16]))
+	dataPtr := unsafe.Pointer(&tv.tmpBuf[diff+24])
 
 	*genPtr = tv.genNum
 	*szPtr = size
@@ -702,7 +702,7 @@ func (tv *vData) abort(realloc bool) error {
 
 	for txn0 != nil {
 		off := 0
-		for off < len(txn0.log) {
+		for off+64 <= len(txn0.log) {
 			logBuf := unsafe.Pointer(&txn0.log[off])
 			genPtr := (*uintptr)(logBuf)
 			if *genPtr != tv.genNum {
@@ -714,7 +714,6 @@ func (tv *vData) abort(realloc bool) error {
 
 			origData := (*[maxInt]byte)(unsafe.Pointer(origPtr))
 			logData := (*[maxInt]byte)(dataPtr)
-
 			copy(origData[:size], logData[:])
 			runtime.FlushRange(unsafe.Pointer(origPtr), size)
 
