@@ -10,14 +10,15 @@ var cacheLineSz = uintptr(runtime.FLUSH_ALIGN)
 type (
 	flushSt struct {
 		//data *Tree
-		data map[uintptr]int
+		data map[unsafe.Pointer]int
 	}
 )
 
 func (f *flushSt) insert(start, size uintptr) {
 	if f.data == nil {
 		//f.data = NewRbTree()
-		f.data = make(map[uintptr]int)
+		// This is kept as a map of unsafe pointers so that GC walks the map
+		f.data = make(map[unsafe.Pointer]int)
 	}
 
 	alignedAddr := start &^ (cacheLineSz - 1)
@@ -30,7 +31,7 @@ func (f *flushSt) insert(start, size uintptr) {
 	// We only care about cacheline aligned addresses
 	for alignedAddr < start+size {
 		//f.data.Put(alignedAddr)
-		f.data[alignedAddr] = 1
+		f.data[unsafe.Pointer(alignedAddr)] = 1
 		alignedAddr += cacheLineSz
 	}
 }
@@ -44,9 +45,9 @@ func (f *flushSt) flushAndDestroy() {
 	}
 }
 
-func flushRbTreeMap(m map[uintptr]int) {
-	for k, _ := range m {
-		runtime.FlushRange(unsafe.Pointer(k), cacheLineSz)
+func flushRbTreeMap(m map[unsafe.Pointer]int) {
+	for k := range m {
+		runtime.FlushRange(k, cacheLineSz)
 	}
 }
 

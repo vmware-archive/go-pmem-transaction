@@ -71,34 +71,30 @@ type (
 		// each element in that slice.
 		//storeSliceHdr []pair
 
-		handle *uLogHandle
-		txp    *uLogData // Would always be pointing to the newest struct
+		first *uLogData
+		txp   *uLogData // Would always be pointing to the newest struct
 
 		// list of log entries which need not be flushed during transaction's
 		// successful end.
 		//skipList []int
-		rlocks   []*sync.RWMutex
-		wlocks   []*sync.RWMutex
-		fs       flushSt
+		rlocks []*sync.RWMutex
+		wlocks []*sync.RWMutex
+		fs     flushSt
 	}
 
 	undoTx struct {
 		log []byte
 	}
 
-	uLogHandle struct {
-		genNum uintptr // Current active generation number
-		data   *uLogData
-	}
-
 	uLogData struct {
-		log  []byte // the third component of slice header is a pointer
-		next *uLogData
+		log    []byte  // the third component of slice header is a pointerx
+		genNum uintptr // Current active generation number
+		next   *uLogData
 	}
 
 	undoTxHeader struct {
 		magic     int
-		logHandle [logNum]uLogHandle
+		logHandle [logNum]uLogData
 	}
 )
 
@@ -106,7 +102,7 @@ var (
 	txHeaderPtr *undoTxHeader
 	undoArray   *bitmap
 	zeroes      [64]byte // Go guarantees that variables will be zeroed out
-	junkVal     [32]byte
+	junkVal     [32]byte // TODO - to delete
 	tVData      [logNum]vData
 )
 
@@ -162,7 +158,7 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 		// Recover data from previous pending transactions, if any
 		for i := 0; i < logNum; i++ {
 			handle := &txHeaderPtr.logHandle[i]
-			tVData[i].handle = handle
+			tVData[i].first = handle
 			tVData[i].genNum = handle.genNum
 			// Reallocate the array for the log entries. TODO: How does this
 			// change with tail not in pmem?
@@ -176,11 +172,9 @@ func initUndoHandles() {
 	for i := 0; i < logNum; i++ {
 		handle := &txHeaderPtr.logHandle[i]
 		handle.genNum = 1
-		handle.data = pnew(uLogData)
-		handle.data.log = pmake([]byte, undoLogInitSize)
-		runtime.FlushRange(unsafe.Pointer(&handle.data.log), 24)
-		tVData[i].handle = handle
-		tVData[i].txp = handle.data
+		handle.log = pmake([]byte, undoLogInitSize)
+		tVData[i].txp = handle
+		tVData[i].first = handle
 		tVData[i].genNum = 1
 	}
 	runtime.PersistRange(unsafe.Pointer(&txHeaderPtr.logHandle),
@@ -213,24 +207,24 @@ func (tv *vData) setTail(tail int) {
 func (tv *vData) resetLogData(realloc bool) {
 
 	// IF NEXT IS NOT NIL, THEN WE CAN JUST KEEP REUSING..
-	tv.txp = tv.handle.data
+	tv.txp = tv.first
 
 	// Zero out ptrArray
 	///*
-		len := len(tv.ptrArray)
-		src := (*(*[maxInt]byte)(unsafe.Pointer(&zeroes[0])))[:]
-		zeroed := 0
-		for len > 0 {
-			sz := 8 // 8 pointers = 64 bytes
-			if len < 8 {
-				sz = len
-			}
-			dest := (*(*[maxInt]byte)(unsafe.Pointer(&tv.ptrArray[zeroed])))[:sz]
-			copy(dest, src)
-			len -= sz
-			zeroed += sz
+	len := len(tv.ptrArray)
+	src := (*(*[maxInt]byte)(unsafe.Pointer(&zeroes[0])))[:]
+	zeroed := 0
+	for len > 0 {
+		sz := 8 // 8 pointers = 64 bytes
+		if len < 8 {
+			sz = len
 		}
-		tv.ptrArray = tv.ptrArray[:0]
+		dest := (*(*[maxInt]byte)(unsafe.Pointer(&tv.ptrArray[zeroed])))[:sz]
+		copy(dest, src)
+		len -= sz
+		zeroed += sz
+	}
+	tv.ptrArray = tv.ptrArray[:0]
 	// */
 
 	// TODO -- we are not trimming the log array
@@ -342,9 +336,7 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 		txn0 = tv.txp
 	}
 
-	// Create a volatile copy of all pointers in this object. LogAddPtrs() also
-	// adds `src` to the list of pointers because we want to keep the object
-	// pointer by `src` alive as well.
+	// Create a volatile copy of all pointers in this object.
 	tv.ptrArray = runtime.LogAddPtrs(uintptr(src), int(size), tv.ptrArray)
 
 	// TO DELETE
@@ -352,10 +344,6 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 	if diff != 0 {
 		diff = cacheSize - diff
 		tmpBuf = unsafe.Pointer(&tv.tmpBuf[diff])
-	}
-	if uintptr(tmpBuf)%cacheSize != 0 {
-		println("tmp array address = ", tmpBuf, " size = ", unsafe.Sizeof(vData{}))
-		log.Fatal("tmp array is not cache aligned!")
 	}
 
 	// Append data to log entry.
@@ -667,8 +655,8 @@ func (tv *vData) End() bool {
 		tv.fs.flushAndDestroy()
 
 		tv.genNum++
-		tv.handle.genNum = tv.genNum
-		runtime.PersistRange(unsafe.Pointer(&tv.handle.genNum), 8)
+		tv.first.genNum = tv.genNum
+		runtime.PersistRange(unsafe.Pointer(&tv.first.genNum), 8)
 		// Can also zero out the volatile pointers here (tv.ptrArray)
 		tv.resetLogData(false) // discard all logs.
 		return true
@@ -710,39 +698,36 @@ func (tv *vData) abort(realloc bool) error {
 	defer tv.unLock()
 	// Replay undo logs. Order last updates first, during abort
 	tv.level = 0
-	txn0 := tv.handle.data // CHECK
+	txn0 := tv.first // CHECK
 
-	// TODO.. The tail may not be set correctly if coming from a reset path?
-	// TODO HOW TO KNOW WHEN NO MORE SPACE..
-	if false {
-		for txn0 != nil {
-			off := 0
-			for off < len(txn0.log) {
-				logBuf := unsafe.Pointer(&txn0.log[off])
-				genPtr := (*uintptr)(logBuf)
-				if *genPtr != tv.genNum {
-					break
-				}
-				size := *(*uintptr)(unsafe.Pointer(&txn0.log[off+8]))
-				origPtr := *(*uintptr)(unsafe.Pointer(&txn0.log[off+16]))
-				dataPtr := unsafe.Pointer(&txn0.log[off+24])
-
-				origData := (*[maxInt]byte)(unsafe.Pointer(origPtr))
-				logData := (*[maxInt]byte)(dataPtr)
-
-				copy(origData[:size], logData[:])
-				runtime.FlushRange(unsafe.Pointer(origPtr), size)
-
-				toAdd := int((size+undoLogHdrSize+63)/64) * 64
-				off += toAdd
+	for txn0 != nil {
+		off := 0
+		for off < len(txn0.log) {
+			logBuf := unsafe.Pointer(&txn0.log[off])
+			genPtr := (*uintptr)(logBuf)
+			if *genPtr != tv.genNum {
+				break
 			}
-			txn0 = txn0.next
+			size := *(*uintptr)(unsafe.Pointer(&txn0.log[off+8]))
+			origPtr := *(*uintptr)(unsafe.Pointer(&txn0.log[off+16]))
+			dataPtr := unsafe.Pointer(&txn0.log[off+24])
+
+			origData := (*[maxInt]byte)(unsafe.Pointer(origPtr))
+			logData := (*[maxInt]byte)(dataPtr)
+
+			copy(origData[:size], logData[:])
+			runtime.FlushRange(unsafe.Pointer(origPtr), size)
+
+			toAdd := int((size+undoLogHdrSize+63)/64) * 64
+			off += toAdd
 		}
-		runtime.Fence()
+		txn0 = txn0.next
 	}
-	tv.handle.genNum++
-	runtime.PersistRange(unsafe.Pointer(&tv.handle.genNum), 8)
-	tv.genNum = tv.handle.genNum
+	runtime.Fence()
+
+	tv.first.genNum++
+	runtime.PersistRange(unsafe.Pointer(&tv.first.genNum), 8)
+	tv.genNum = tv.first.genNum
 	tv.resetLogData(realloc)
 	return nil
 }
