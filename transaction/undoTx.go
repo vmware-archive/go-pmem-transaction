@@ -101,9 +101,10 @@ type (
 var (
 	txHeaderPtr *undoTxHeader
 	undoArray   *bitmap
-	zeroes      [64]byte // Go guarantees that variables will be zeroed out
-	junkVal     [32]byte // TODO - to delete
-	tVData      [logNum]vData
+	// Kept at 128 bytes as we want a 64-byte aligned region somewhere inside
+	// zeroes. This variable used to memset a cacheline size region of memory
+	zeroes [128]byte
+	tVData [logNum]vData
 )
 
 const (
@@ -334,6 +335,7 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 	if tail+toAdd > cap(txn0.log) { // READS CACHELINE
 		tv.increaseLogTail(toAdd)
 		txn0 = tv.txp
+		tail = tv.tail
 	}
 
 	// Create a volatile copy of all pointers in this object.
@@ -380,9 +382,7 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 		}
 	*/
 	movnt(unsafe.Pointer(&txn0.log[tail]), tmpBuf, cacheSize)
-	/*if uintptr(unsafe.Pointer(&t.log[tail]))%cacheSize != 0 {
-		log.Fatal("Unaligned address 1")
-	}*/
+
 	tail += cacheSize
 
 	// Copy remaining 64 byte aligned entries
@@ -392,9 +392,7 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 		copy(destSlc, srcSlc)
 
 		movnt(unsafe.Pointer(&txn0.log[tail]), tmpBuf, cacheSize)
-		if uintptr(unsafe.Pointer(&txn0.log[tail]))%cacheSize != 0 {
-			log.Fatal("Unaligned address 2")
-		}
+
 		size -= cacheSize
 		srcU += cacheSize
 		tail += cacheSize
@@ -402,23 +400,10 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 
 	// Copy the final < 64-byte entry
 	sz = size
-	/*if size >= cacheSize { // DEBUG : TO DELETE
-		log.Fatal("Invalid size")
-	}*/
 	if sz > 0 {
 		destSlc = (*(*[maxInt]byte)(tmpBuf))[:]
 		srcSlc = (*(*[maxInt]byte)(unsafe.Pointer(srcU)))[:sz]
 		copy(destSlc, srcSlc)
-
-		/*
-			rem = cacheSize - sz
-			if rem == 0 { // DEBUG TO DELETE
-				log.Fatal("Invalid size")
-			}
-		*/
-		if uintptr(unsafe.Pointer(&txn0.log[tail]))%cacheSize != 0 {
-			log.Fatal("Unaligned address 3")
-		}
 		movnt(unsafe.Pointer(&txn0.log[tail]), tmpBuf, cacheSize)
 		tail += cacheSize
 	}
@@ -696,32 +681,43 @@ func (tv *vData) unLock() {
 // need to be reallocated.
 func (tv *vData) abort(realloc bool) error {
 	defer tv.unLock()
-	// Replay undo logs. Order last updates first, during abort
 	tv.level = 0
-	txn0 := tv.first // CHECK
+	txn0 := tv.first
+
+	// Aborting log entries has to be done from last to first. Since this is
+	// difficult when using a linked list of array, undoEntries first builds
+	// a list of pointers at which each entry begins. These are then aborted in
+	// the inverse order in the next step
+	var undoEntries []uintptr
 
 	for txn0 != nil {
 		off := 0
 		for off+64 <= len(txn0.log) {
 			logBuf := unsafe.Pointer(&txn0.log[off])
 			genPtr := (*uintptr)(logBuf)
+			size := *(*uintptr)(unsafe.Pointer(&txn0.log[off+8]))
 			if *genPtr != tv.genNum {
 				break
 			}
-			size := *(*uintptr)(unsafe.Pointer(&txn0.log[off+8]))
-			origPtr := *(*uintptr)(unsafe.Pointer(&txn0.log[off+16]))
-			dataPtr := unsafe.Pointer(&txn0.log[off+24])
 
-			origData := (*[maxInt]byte)(unsafe.Pointer(origPtr))
-			logData := (*[maxInt]byte)(dataPtr)
-			copy(origData[:size], logData[:])
-			runtime.FlushRange(unsafe.Pointer(origPtr), size)
-
+			undoEntries = append(undoEntries, uintptr(unsafe.Pointer(&txn0.log[off+8])))
 			toAdd := int((size+undoLogHdrSize+63)/64) * 64
 			off += toAdd
 		}
 		txn0 = txn0.next
 	}
+
+	for j := len(undoEntries) - 1; j >= 0; j-- {
+		entryPtr := undoEntries[j]
+		size := *(*uintptr)(unsafe.Pointer(entryPtr))
+		origPtr := *(*uintptr)(unsafe.Pointer(entryPtr + 8))
+		dataPtr := unsafe.Pointer(entryPtr + 16)
+		origData := (*[maxInt]byte)(unsafe.Pointer(origPtr))
+		logData := (*[maxInt]byte)(dataPtr)
+		copy(origData[:size], logData[:])
+		runtime.FlushRange(unsafe.Pointer(origPtr), size)
+	}
+
 	runtime.Fence()
 
 	tv.first.genNum++
