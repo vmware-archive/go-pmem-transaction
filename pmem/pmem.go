@@ -47,6 +47,10 @@ func populateTxHeaderInRoot() {
 
 // Init returns true if this was a first time initialization.
 func Init(fileName string) bool {
+	// Register application callback function
+	// This function is called during heap recovery before pointers are swizzled
+	runtime.AppCallBack = transaction.SwizzleAndAbort
+
 	runtimeRootPtr, err := runtime.PmemInit(fileName)
 	if err != nil {
 		log.Fatal("Persistent memory initialization failed")

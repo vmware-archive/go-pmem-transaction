@@ -163,7 +163,7 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 			tVData[i].genNum = handle.genNum
 			// Reallocate the array for the log entries. TODO: How does this
 			// change with tail not in pmem?
-			tVData[i].abort(true)
+			tVData[i].abort(false)
 		}
 	}
 	return logHeadPtr
@@ -205,13 +205,14 @@ func (tv *vData) setTail(tail int) {
 
 // The realloc parameter indicates if the backing array for the log entries
 // need to be reallocated.
-func (tv *vData) resetLogData(realloc bool) {
+func (tv *vData) resetLogData() {
 
 	// IF NEXT IS NOT NIL, THEN WE CAN JUST KEEP REUSING..
 	tv.txp = tv.first
 
 	// Zero out ptrArray
-	///*
+	// TODO this is currently not done in an aligned manner. Can as well make
+	// it one single copy() call.
 	len := len(tv.ptrArray)
 	src := (*(*[maxInt]byte)(unsafe.Pointer(&zeroes[0])))[:]
 	zeroed := 0
@@ -226,19 +227,9 @@ func (tv *vData) resetLogData(realloc bool) {
 		zeroed += sz
 	}
 	tv.ptrArray = tv.ptrArray[:0]
-	// */
 
 	// TODO -- we are not trimming the log array
 	tv.tail = 0
-
-	if realloc {
-		// Allocate a new backing array if realloc is true. After a program
-		// crash, we must always reach here
-		//t.log = pmake([]byte, undoLogInitSize)
-		//runtime.PersistRange(unsafe.Pointer(&t.log), unsafe.Sizeof(t.log))
-	} else {
-		// Nothing to do
-	}
 }
 
 // Also takes care of increasing the number of entries underlying log can hold
@@ -643,7 +634,7 @@ func (tv *vData) End() bool {
 		tv.first.genNum = tv.genNum
 		runtime.PersistRange(unsafe.Pointer(&tv.first.genNum), 8)
 		// Can also zero out the volatile pointers here (tv.ptrArray)
-		tv.resetLogData(false) // discard all logs.
+		tv.resetLogData() // discard all logs.
 		return true
 	}
 	return false
@@ -677,9 +668,8 @@ func (tv *vData) unLock() {
 	tv.rlocks = tv.rlocks[:0]
 }
 
-// The realloc parameter indicates if the backing array for the log entries
-// need to be reallocated.
-func (tv *vData) abort(realloc bool) error {
+// swizzle indicates if pointers has been to swizzled before being dereferenced.
+func (tv *vData) abort(swizzle bool) error {
 	defer tv.unLock()
 	tv.level = 0
 	txn0 := tv.first
@@ -690,27 +680,53 @@ func (tv *vData) abort(realloc bool) error {
 	// the inverse order in the next step
 	var undoEntries []uintptr
 
+	// TODO this can be optimized by storing logs in the following format:
+	//  +.........+.......+........+.........+
+	//  |   DATA  |  PTR  |  SIZE  |  GEN #  |
+	//  +....................................+
+	//
+	// That is, store data first and metadata at the end so that traversing
+	// from the end is possible while aborting. During End(), traverse direction
+	// does not matter.
+
 	for txn0 != nil {
 		off := 0
-		for off+64 <= len(txn0.log) {
-			logBuf := unsafe.Pointer(&txn0.log[off])
+		for off+64 <= len(txn0.log) { // len need not be swizzled
+			var logBuf unsafe.Pointer
+			if swizzle {
+				shdr := (*sliceHeader)(unsafe.Pointer(&txn0.log))
+				sPtr := shdr.data
+				sPtrSwizz := runtime.SwizzlePointer(uintptr(sPtr))
+				logBuf = unsafe.Pointer(uintptr(sPtrSwizz) + uintptr(off))
+			} else {
+				logBuf = unsafe.Pointer(&txn0.log[off])
+			}
+
 			genPtr := (*uintptr)(logBuf)
-			size := *(*uintptr)(unsafe.Pointer(&txn0.log[off+8]))
 			if *genPtr != tv.genNum {
 				break
 			}
 
-			undoEntries = append(undoEntries, uintptr(unsafe.Pointer(&txn0.log[off+8])))
+			sizePtr := (unsafe.Pointer(uintptr(logBuf) + 8))
+			size := *(*uintptr)(sizePtr)
+			undoEntries = append(undoEntries, uintptr(sizePtr))
 			toAdd := int((size+undoLogHdrSize+63)/64) * 64
 			off += toAdd
 		}
 		txn0 = txn0.next
+		if swizzle {
+			txn0p := uintptr(unsafe.Pointer(txn0))
+			txn0 = (*uLogData)(unsafe.Pointer(runtime.SwizzlePointer(txn0p)))
+		}
 	}
 
 	for j := len(undoEntries) - 1; j >= 0; j-- {
 		entryPtr := undoEntries[j]
 		size := *(*uintptr)(unsafe.Pointer(entryPtr))
 		origPtr := *(*uintptr)(unsafe.Pointer(entryPtr + 8))
+		if swizzle {
+			origPtr = runtime.SwizzlePointer(origPtr)
+		}
 		dataPtr := unsafe.Pointer(entryPtr + 16)
 		origData := (*[maxInt]byte)(unsafe.Pointer(origPtr))
 		logData := (*[maxInt]byte)(dataPtr)
@@ -723,6 +739,37 @@ func (tv *vData) abort(realloc bool) error {
 	tv.first.genNum++
 	runtime.PersistRange(unsafe.Pointer(&tv.first.genNum), 8)
 	tv.genNum = tv.first.genNum
-	tv.resetLogData(realloc)
+	tv.resetLogData()
 	return nil
+}
+
+// If runtime need to do pointer swizzling duing initilization, then undo log
+// entries need to be reverted before doing pointer swizzling. This function is
+// registered as a callback with the runtime, and will be called before pointers
+// are swizzled. rootPtr is the swizzled root pointer set by the application.
+func SwizzleAndAbort(rootPtr unsafe.Pointer) {
+	// pmemHeader definition is not available here.
+	type pmh struct {
+		undoTxHeadPtr unsafe.Pointer
+		redoTxHeadPtr unsafe.Pointer
+		appData       []int // namedObject definition not available here
+	}
+	appRootPtr := (*pmh)(rootPtr)
+	undoTxSwizzled := runtime.SwizzlePointer(uintptr(unsafe.Pointer(appRootPtr.undoTxHeadPtr)))
+	undoTxHeadPtr := (*undoTxHeader)(unsafe.Pointer(undoTxSwizzled))
+
+	// Check if the magic number matches
+	if undoTxHeadPtr.magic != magic {
+		log.Fatal("undoTxHeader magic does not match!")
+	}
+
+	for i := 0; i < logNum; i++ {
+		handle := &undoTxHeadPtr.logHandle[i]
+		tVData[i].first = handle
+		tVData[i].genNum = handle.genNum
+		// Reallocate the array for the log entries. TODO: How does this
+		// change with tail not in pmem?
+		tVData[i].abort(true)
+	}
+
 }
