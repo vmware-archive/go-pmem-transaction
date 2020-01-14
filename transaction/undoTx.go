@@ -181,6 +181,7 @@ func NewUndoTx() TX {
 }
 
 func releaseUndoTx(t *undoTx) {
+	t.fs.Destroy()
 	// Reset the pointers in the log entries, but need not allocate a new
 	// backing array
 	t.abort(false)
@@ -296,7 +297,12 @@ func (t *undoTx) readSlice(slicePtr interface{}, stIndex int,
 func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 	uData := t.curr
 	tail := t.tail
-	sizeBackup := size
+
+	exists := t.fs.insert(uintptr(src), size)
+	if exists {
+		return nil
+	}
+
 	srcU := uintptr(src)
 
 	// Number of bytes we need to log this entry. It is size + uLogHdrSize,
@@ -365,7 +371,6 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 	}
 
 	runtime.Fence() // Fence after movnt
-	t.fs.insert(uintptr(src), sizeBackup)
 	t.tail = tail
 
 	return nil
