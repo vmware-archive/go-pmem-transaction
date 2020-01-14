@@ -191,6 +191,7 @@ func NewUndoTx() TX {
 }
 
 func releaseUndoTx(tv *vData) {
+	tv.fs.Destroy()
 	// Reset the pointers in the log entries, but need not allocate a new
 	// backing array
 	tv.abort(false)
@@ -317,6 +318,12 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 	txn0 := tv.txp
 	tail := tv.tail
 	sizeBackup := size
+
+	exists := tv.fs.insert(uintptr(src), sizeBackup)
+	if exists {
+		return nil
+	}
+
 	srcU := uintptr(src)
 	tmpBuf := unsafe.Pointer(&tv.tmpBuf[0])
 
@@ -401,7 +408,6 @@ func (tv *vData) Log3(src unsafe.Pointer, size uintptr) error {
 
 	// Fence after movnt
 	runtime.Fence()
-	tv.fs.insert(uintptr(src), sizeBackup)
 
 	tv.tail = tail
 
