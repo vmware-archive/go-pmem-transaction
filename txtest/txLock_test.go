@@ -7,10 +7,11 @@ package txtest
 
 import (
 	"fmt"
-	"github.com/vmware/go-pmem-transaction/transaction"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/vmware/go-pmem-transaction/transaction"
 )
 
 func TestUndoLogLock(t *testing.T) {

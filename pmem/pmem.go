@@ -8,12 +8,13 @@ package pmem
 import (
 	"errors"
 	"fmt"
-	"github.com/vmware/go-pmem-transaction/transaction"
 	"log"
 	"reflect"
 	"runtime"
 	"sync"
 	"unsafe"
+
+	"github.com/vmware/go-pmem-transaction/transaction"
 )
 
 type (

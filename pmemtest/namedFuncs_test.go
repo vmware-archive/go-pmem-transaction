@@ -8,13 +8,14 @@ package pmemtest
 import (
 	"errors"
 	"fmt"
-	"github.com/vmware/go-pmem-transaction/pmem"
-	"github.com/vmware/go-pmem-transaction/transaction"
 	"os"
 	"os/exec"
 	"runtime/debug"
 	"testing"
 	"time"
+
+	"github.com/vmware/go-pmem-transaction/pmem"
+	"github.com/vmware/go-pmem-transaction/transaction"
 )
 
 type structPmemTest struct {
