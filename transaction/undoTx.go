@@ -57,45 +57,70 @@ type (
 
 	// Each undo log handle. Contains volatile metadata associated with the handle
 	undoTx struct {
+		tmpBuf [128]byte // A temporary buffer to copy data
+		genNum uintptr   // A volatile copy of the generation number
+
+		// An array that holds all pointers found in the logged data in
+		// so that they will be found by the GC.
+		ptrArray []unsafe.Pointer
+
 		// tail position of the log where new data would be stored
 		tail int
 
 		// Level of nesting. Needed for nested transactions
 		level int
 
-		// Index of the log handle within undoArray
-		index int
-
 		// record which log entries store sliceheader, and store the size of
 		// each element in that slice.
 		storeSliceHdr []pair
 
-		// Pointer to persistent data associated with this handle
-		data *uLogData
+		// Pointer to the array in persistent memory where logged data is stored.
+		// first points to the first linked array while curr points to the
+		// currently used array which may or may not be equal to first.
+		first *uLogData
+		curr  *uLogData
 
 		// list of log entries which need not be flushed during transaction's
 		// successful end.
 		skipList []int
 		rlocks   []*sync.RWMutex
 		wlocks   []*sync.RWMutex
-		fs       *flushSt
+		fs       flushSt
 	}
 
 	// Actual undo log data residing in persistent memory
 	uLogData struct {
-		log []entry
+		log    []byte
+		genNum uintptr // generation number of the logged data
+		next   *uLogData
 	}
 
 	undoTxHeader struct {
 		magic   int
-		logData [logNum]*uLogData
+		logData [logNum]uLogData
 	}
 )
 
 var (
 	txHeaderPtr *undoTxHeader
 	undoArray   *bitmap
-	uHandles    [logNum]undoTx
+	// zeroes is used to memset a cacheline size region of memory. It is sized
+	// at 128 bytes as we want a 64-byte aligned region somewhere inside zeroes.
+	zeroes   [128]byte
+	uHandles [logNum]undoTx
+)
+
+const (
+	// Initial size of the undo log buffer in persistent memory
+	uLogInitSize = 65536
+
+	// Header data size before every undo log entry. Each undo log entry header
+	// has the layout shown below, and occupies 24 bytes.
+	// +--------+------+---------+-----------+
+	// | genNum | size | Pointer |    Data   |
+	// |   8    |   8  |    8    |  var-size |
+	// +--------+------+---------+-----------+
+	uLogHdrSize = 24
 )
 
 /* Does the first time initialization, else restores log structure and
@@ -123,13 +148,10 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 
 		// Recover data from previous pending transactions, if any
 		for i := 0; i < logNum; i++ {
-			handle := txHeaderPtr.logData[i]
-			uHandles[i].data = handle
-			uHandles[i].index = i
-			// Reallocate the array for the log entries. TODO: How does this
-			// change with tail not in pmem?
-			uHandles[i].abort(true)
-			uHandles[i].resetVData()
+			handle := &txHeaderPtr.logData[i]
+			uHandles[i].first = handle
+			uHandles[i].genNum = handle.genNum
+			uHandles[i].abort()
 		}
 	}
 
@@ -138,16 +160,16 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 
 func initUndoHandles() {
 	for i := 0; i < logNum; i++ {
-		handle := pnew(uLogData)
-		handle.log = pmake([]entry, NumEntries)
-		runtime.PersistRange(unsafe.Pointer(&handle.log), unsafe.Sizeof(handle.log))
-		txHeaderPtr.logData[i] = handle
-		uHandles[i].resetVData()
-		uHandles[i].data = handle
-		uHandles[i].index = i
+		handle := &txHeaderPtr.logData[i]
+		handle.genNum = 1
+		handle.log = pmake([]byte, uLogInitSize)
+		uHandles[i].first = handle
+		uHandles[i].curr = handle
+		uHandles[i].genNum = 1
 	}
 
-	runtime.PersistRange(unsafe.Pointer(&txHeaderPtr.logData), logNum*ptrSize)
+	runtime.PersistRange(unsafe.Pointer(&txHeaderPtr.logData),
+		logNum*unsafe.Sizeof(txHeaderPtr.logData[0]))
 }
 
 func NewUndoTx() TX {
@@ -161,53 +183,67 @@ func NewUndoTx() TX {
 func releaseUndoTx(t *undoTx) {
 	// Reset the pointers in the log entries, but need not allocate a new
 	// backing array
-	t.abort(false)
-	undoArray.clearBit(t.index)
+	t.abort()
+	index := (uintptr(unsafe.Pointer(t)) - uintptr(unsafe.Pointer(&uHandles[0]))) /
+		unsafe.Sizeof(uHandles[0])
+	undoArray.clearBit(int(index))
 }
 
 func (t *undoTx) setTail(tail int) {
 	t.tail = tail
 }
 
-// The realloc parameter indicates if the backing array for the log entries
-// need to be reallocated.
-func (t *undoTx) resetLogData(realloc bool) {
-	uData := t.data
-	if realloc {
-		// Allocate a new backing array if realloc is true. After a program
-		// crash, we must always reach here
-		uData.log = pmake([]entry, NumEntries)
-		runtime.PersistRange(unsafe.Pointer(&uData.log), unsafe.Sizeof(uData.log))
-	} else {
-		// Zero out the pointers in the log entries so that the data pointed by
-		// them will be garbage collected.
-		for i := 0; i < len(uData.log); i++ {
-			if uData.log[i].genNum == 0 {
-				break
-			}
-			uData.log[i].ptr = nil
-			uData.log[i].data = nil
-			uData.log[i].genNum = 0
-			runtime.FlushRange(unsafe.Pointer(&uData.log[i].ptr), 3*ptrSize)
-		}
+// resetLogData makes the undo handle point to the first element of the linked
+// list of undo logs. The pointer array is zeroed out to ensure those pointers
+// can get garbage collected.
+func (t *undoTx) resetLogData() {
+	t.curr = t.first
+	t.tail = 0
+
+	// Zero out ptrArray
+	len := len(t.ptrArray)
+	if len == 0 {
+		return
 	}
+	t.ptrArray[0] = nil
+	for i := 1; i < len; i *= 2 {
+		copy(t.ptrArray[i:], t.ptrArray[:i])
+	}
+	t.ptrArray = t.ptrArray[:0]
 }
 
-// Also takes care of increasing the number of entries underlying log can hold
-func (t *undoTx) increaseLogTail() {
-	uData := t.data
-	tail := t.tail + 1 // new tail
-	if tail >= cap(uData.log) {
-		newE := 2 * cap(uData.log) // Double number of entries which can be stored
-		newLog := pmake([]entry, newE)
-		copy(newLog, uData.log)
-		runtime.PersistRange(unsafe.Pointer(&newLog[0]),
-			uintptr(newE)*unsafe.Sizeof(newLog[0])) // Persist new log
-		uData.log = newLog
-		runtime.PersistRange(unsafe.Pointer(&uData.log), unsafe.Sizeof(uData.log))
+// increaseLogTail creates an undo log buffer of size at least toAdd bytes and
+// links it to the existing linked list of log buffers. It also tries to reuse
+// any existing buffers that has sufficient capacity.
+func (t *undoTx) increaseLogTail(toAdd int) {
+	uData := t.curr
+
+	// We need at least toAdd bytes and current buffer do not have that much
+	// space available.
+	newCap := cap(uData.log) * 2
+	if toAdd > newCap {
+		// make sure newCap is a multiple of 64
+		newCap = (64 * (toAdd + 63) / 64)
 	}
-	// common case
-	t.setTail(tail)
+
+	// Check if there is a linked log array with capacity at least 'toAdd'.
+	if uData.next != nil {
+		nextData := uData.next
+		if cap(nextData.log) >= newCap {
+			t.curr = nextData
+			t.tail = 0
+			return
+		}
+	}
+
+	newLog := pnew(uLogData)
+	newLog.log = pmake([]byte, newCap)
+	runtime.PersistRange(unsafe.Pointer(newLog), 24)
+
+	uData.next = newLog
+	runtime.PersistRange(unsafe.Pointer(&uData.next), 8)
+	t.curr = newLog
+	t.tail = 0
 }
 
 type value struct {
@@ -255,24 +291,94 @@ func (t *undoTx) readSlice(slicePtr interface{}, stIndex int,
 	return s.Slice(stIndex, endIndex).Interface()
 }
 
-func (t *undoTx) Log2(src, dst unsafe.Pointer, size uintptr) error {
-	uData := t.data
+// Log3 logs data in a linked list of byte arrays. 'src' is the pointer to the
+// data to be logged and 'size' is the number of bytes to log.
+func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
+	uData := t.curr
 	tail := t.tail
-	// Append data to log entry.
-	movnt(dst, src, size)
-	movnt(unsafe.Pointer(&uData.log[tail]),
-		unsafe.Pointer(&entry{src, dst, int(size), 1}),
-		unsafe.Sizeof(uData.log[tail]))
+	sizeBackup := size
+	srcU := uintptr(src)
 
-	// Fence after movnt
-	runtime.Fence()
-	t.fs.insert(uintptr(src), size)
-	t.increaseLogTail()
+	// Number of bytes we need to log this entry. It is size + uLogHdrSize,
+	// rounded up to cache line size
+	logSize := int((size+uLogHdrSize+63)/cacheSize) * cacheSize
+	if tail+logSize > cap(uData.log) {
+		t.increaseLogTail(logSize)
+		uData = t.curr
+		tail = t.tail
+	}
+
+	// Create a volatile copy of all pointers in this object.
+	t.ptrArray = runtime.CollectPtrs(uintptr(src), int(size), t.ptrArray)
+
+	tmpBuf := unsafe.Pointer(&t.tmpBuf[0])
+	diff := uintptr(tmpBuf) % cacheSize
+	if diff != 0 {
+		diff = cacheSize - diff
+		tmpBuf = unsafe.Pointer(&t.tmpBuf[diff])
+	}
+
+	// Append data to log entry
+	// copy 64 bytes at a time
+
+	genPtr := (*uintptr)(tmpBuf)
+	szPtr := (*uintptr)(unsafe.Pointer(&t.tmpBuf[diff+8]))
+	origPtr := (*uintptr)(unsafe.Pointer(&t.tmpBuf[diff+16]))
+	dataPtr := unsafe.Pointer(&t.tmpBuf[diff+24])
+
+	*genPtr = t.genNum
+	*szPtr = size
+	*origPtr = uintptr(src)
+	sz := uintptr(cacheSize - uLogHdrSize)
+	if size < sz {
+		sz = size
+	}
+
+	// copy the first sz bytes
+	destSlc := (*(*[maxInt]byte)(dataPtr))[:sz]
+	srcSlc := (*(*[maxInt]byte)(unsafe.Pointer(srcU)))[:sz]
+	copy(destSlc, srcSlc)
+	srcU += sz
+	size -= sz
+	movnt(unsafe.Pointer(&uData.log[tail]), tmpBuf, cacheSize)
+	tail += cacheSize
+
+	// Copy remaining 64 byte aligned entries
+	for size >= cacheSize {
+		destSlc = (*(*[maxInt]byte)(tmpBuf))[:]
+		srcSlc = (*(*[maxInt]byte)(unsafe.Pointer(srcU)))[:cacheSize]
+		copy(destSlc, srcSlc)
+		movnt(unsafe.Pointer(&uData.log[tail]), tmpBuf, cacheSize)
+		size -= cacheSize
+		srcU += cacheSize
+		tail += cacheSize
+	}
+
+	// Copy the final < 64-byte entry
+	sz = size
+	if sz > 0 {
+		destSlc = (*(*[maxInt]byte)(tmpBuf))[:]
+		srcSlc = (*(*[maxInt]byte)(unsafe.Pointer(srcU)))[:sz]
+		copy(destSlc, srcSlc)
+		movnt(unsafe.Pointer(&uData.log[tail]), tmpBuf, cacheSize)
+		tail += cacheSize
+	}
+
+	runtime.Fence() // Fence after movnt
+	t.fs.insert(uintptr(src), sizeBackup)
+	t.tail = tail
+
+	return nil
+}
+
+func (t *undoTx) Log2(src, dst unsafe.Pointer, size uintptr) error {
+	log.Fatal("Log2() not implemented")
 	return nil
 }
 
 // TODO: Logging slice of slice not supported
 func (t *undoTx) Log(intf ...interface{}) error {
+	log.Fatal("Log() not implemented")
 	doUpdate := false
 	if len(intf) == 2 { // If method is invoked with syntax Log(ptr, data),
 		// this method will do (*ptr = data) operation too
@@ -300,6 +406,8 @@ func (t *undoTx) Log(intf ...interface{}) error {
 			// Used later during End()
 			t.storeSliceHdr = append(t.storeSliceHdr, pair{tail, int(typ.Elem().Size())})
 		}
+
+		/* TODO
 		size := int(typ.Size())
 		v2 := reflect.PNew(oldv.Type())
 		reflect.Indirect(v2).Set(oldv) // copy old data
@@ -315,9 +423,10 @@ func (t *undoTx) Log(intf ...interface{}) error {
 		runtime.FlushRange(uData.log[tail].data, uintptr(size))
 		runtime.FlushRange(unsafe.Pointer(&uData.log[tail]),
 			unsafe.Sizeof(uData.log[tail]))
+		*/
 
 		// Update log offset in header.
-		t.increaseLogTail()
+		t.increaseLogTail(0) // TODO
 		if oldv.Kind() == reflect.Slice {
 			// Pointer to slice was passed to Log(). So, log slice elements too,
 			// but no need to flush these contents in End()
@@ -380,6 +489,8 @@ func (t *undoTx) logSlice(v1 reflect.Value, flushAtEnd bool) {
 		destPtr := (*[maxInt]byte)(vshdr.data)[:size:size]
 		copy(destPtr, sourcePtr)
 	}
+
+	/* TODO
 	tail := t.tail
 	uData := t.data
 	uData.log[tail].ptr = unsafe.Pointer(v1.Pointer())  // point to original data
@@ -400,9 +511,10 @@ func (t *undoTx) logSlice(v1 reflect.Value, flushAtEnd bool) {
 	runtime.FlushRange(uData.log[tail].data, uintptr(size))
 	runtime.FlushRange(unsafe.Pointer(&uData.log[tail]),
 		unsafe.Sizeof(uData.log[tail]))
+	*/
 
 	// Update log offset in header.
-	t.increaseLogTail()
+	t.increaseLogTail(0) // TODO
 }
 
 /* Exec function receives a variable number of interfaces as its arguments.
@@ -471,15 +583,18 @@ func (t *undoTx) End() bool {
 	if t.level == 0 {
 		return true
 	}
+
 	t.level--
 	if t.level == 0 {
 		defer t.unLock()
 		t.fs.flushAndDestroy()
-		t.resetVData()
-		t.resetLogData(false) // discard all logs.
-		runtime.Fence()
+		t.genNum++
+		t.first.genNum = t.genNum
+		runtime.PersistRange(unsafe.Pointer(&t.first.genNum), 8)
+		t.resetLogData() // discard all logs.
 		return true
 	}
+
 	return false
 }
 
@@ -511,40 +626,56 @@ func (t *undoTx) unLock() {
 	t.rlocks = t.rlocks[:0]
 }
 
-// The realloc parameter indicates if the backing array for the log entries
-// need to be reallocated.
-func (t *undoTx) abort(realloc bool) error {
+// abort() aborts the ongoing undo transaction. It reverts the changes made by
+// the application by copying the logged copy of the data to its original
+// location in persistent memory.
+func (t *undoTx) abort() error {
 	defer t.unLock()
-	// Replay undo logs. Order last updates first, during abort
 	t.level = 0
-	uData := t.data
-	l := len(uData.log)
-	for i := l - 1; i >= 0; i-- {
-		if uData.log[i].genNum == 0 { // no data in this log entry. TODO: This can
-			// be avoided if we guarantee update to one memory location is stored
-			// just once in the log entries. Then, we can loop forward & when
-			// we get genNum==0 we can exit the loop.
-			continue
+	uData := t.first
+
+	// Aborting log entries has to be done from last to first. Since this is
+	// difficult when using a linked list of array, undoEntries first builds
+	// a list of pointers at which each entry begins. These are then aborted in
+	// the inverse order in the next step
+	var undoEntries []uintptr
+
+	for uData != nil {
+		off := 0
+		for off+64 <= len(uData.log) {
+			logBuf := unsafe.Pointer(&uData.log[off])
+			genPtr := (*uintptr)(logBuf)
+			if *genPtr != t.genNum {
+				// The generation number of this entry does not match the
+				// current active generation number. So this is not a valid
+				// log entry.
+				break
+			}
+
+			sizePtr := (unsafe.Pointer(uintptr(logBuf) + ptrSize))
+			size := *(*uintptr)(sizePtr)
+			undoEntries = append(undoEntries, uintptr(sizePtr))
+			toAdd := int((size+uLogHdrSize+63)/64) * 64
+			off += toAdd
 		}
-		origDataPtr := (*[maxInt]byte)(uData.log[i].ptr)
-		logDataPtr := (*[maxInt]byte)(uData.log[i].data)
-		original := origDataPtr[:uData.log[i].size:uData.log[i].size]
-		logdata := logDataPtr[:uData.log[i].size:uData.log[i].size]
-		copy(original, logdata)
-		runtime.FlushRange(uData.log[i].ptr, uintptr(uData.log[i].size))
+		uData = uData.next
+	}
+
+	for j := len(undoEntries) - 1; j >= 0; j-- {
+		entry := undoEntries[j]
+		size := *(*uintptr)(unsafe.Pointer(entry))
+		origPtr := *(*uintptr)(unsafe.Pointer(entry + ptrSize))
+		dataPtr := unsafe.Pointer(entry + 16)
+		origData := (*[maxInt]byte)(unsafe.Pointer(origPtr))
+		logData := (*[maxInt]byte)(dataPtr)
+		copy(origData[:size], logData[:])
+		runtime.FlushRange(unsafe.Pointer(origPtr), size)
 	}
 	runtime.Fence()
-	t.resetLogData(realloc)
-	t.resetVData()
-	return nil
-}
 
-func (t *undoTx) resetVData() {
-	t.tail = 0
-	t.level = 0
-	t.storeSliceHdr = t.storeSliceHdr[:0]
-	t.skipList = t.skipList[:0]
-	t.rlocks = t.rlocks[:0]
-	t.wlocks = t.wlocks[:0]
-	t.fs = new(flushSt)
+	t.first.genNum++
+	runtime.PersistRange(unsafe.Pointer(&t.first.genNum), ptrSize)
+	t.genNum = t.first.genNum
+	t.resetLogData()
+	return nil
 }

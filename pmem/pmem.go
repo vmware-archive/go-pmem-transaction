@@ -41,6 +41,10 @@ var (
 	m       *sync.RWMutex // Updates to map are thread safe through this lock
 )
 
+const (
+	sliceHeaderSize = 24 // size of a slice header
+)
+
 func populateTxHeaderInRoot() {
 	rootPtr.undoTxHeadPtr = transaction.Init(rootPtr.undoTxHeadPtr, "undo")
 	rootPtr.redoTxHeadPtr = transaction.Init(rootPtr.redoTxHeadPtr, "redo")
@@ -118,7 +122,7 @@ func Make(name string, intf ...interface{}) interface{} {
 	tx := transaction.NewUndoTx()
 	m.Lock()
 	tx.Begin()
-	tx.Log(&rootPtr.appData) // add to root pointer
+	tx.Log3(unsafe.Pointer(&rootPtr.appData), sliceHeaderSize) // add to root pointer
 	rootPtr.appData = append(rootPtr.appData, newNamedObj)
 	tx.End()
 	m.Unlock()
@@ -157,7 +161,7 @@ func New(name string, intf interface{}) unsafe.Pointer {
 	tx := transaction.NewUndoTx()
 	m.Lock()
 	tx.Begin()
-	tx.Log(&rootPtr.appData) // add to root pointer
+	tx.Log3(unsafe.Pointer(&rootPtr.appData), sliceHeaderSize) // add to root pointer
 	rootPtr.appData = append(rootPtr.appData, newNamedObj)
 	tx.End()
 	m.Unlock()
@@ -176,7 +180,7 @@ func Delete(name string) error {
 	}
 	tx := transaction.NewUndoTx()
 	tx.Begin()
-	tx.Log(&rootPtr.appData)
+	tx.Log3(unsafe.Pointer(&rootPtr.appData), sliceHeaderSize)
 	rootPtr.appData = append(rootPtr.appData[:i], rootPtr.appData[i+1:]...)
 	tx.End()
 	transaction.Release(tx)

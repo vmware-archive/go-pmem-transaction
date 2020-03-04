@@ -18,6 +18,7 @@ const (
 	logNum     = 512
 	NumEntries = 128
 	ptrSize    = 8 // Size of an integer or pointer value in Go
+	cacheSize  = 64
 )
 
 // transaction interface
@@ -26,6 +27,7 @@ type (
 		Begin() error
 		Log(...interface{}) error
 		Log2(src, dst unsafe.Pointer, size uintptr) error
+		Log3(src unsafe.Pointer, size uintptr) error
 		ReadLog(...interface{}) interface{}
 		Exec(...interface{}) ([]reflect.Value, error)
 		End() bool
