@@ -72,7 +72,7 @@ type (
 
 		// record which log entries store sliceheader, and store the size of
 		// each element in that slice.
-		storeSliceHdr []pair
+		// storeSliceHdr []pair // not used as Log() not supported
 
 		// Pointer to the array in persistent memory where logged data is stored.
 		// first points to the first linked array while curr points to the
@@ -82,10 +82,10 @@ type (
 
 		// list of log entries which need not be flushed during transaction's
 		// successful end.
-		skipList []int
-		rlocks   []*sync.RWMutex
-		wlocks   []*sync.RWMutex
-		fs       flushSt
+		// skipList []int // not used as Log() not supported
+		rlocks []*sync.RWMutex
+		wlocks []*sync.RWMutex
+		fs     flushSt
 	}
 
 	// Actual undo log data residing in persistent memory
@@ -151,7 +151,7 @@ func initUndoTx(logHeadPtr unsafe.Pointer) unsafe.Pointer {
 			handle := &txHeaderPtr.logData[i]
 			uHandles[i].first = handle
 			uHandles[i].genNum = handle.genNum
-			uHandles[i].abort()
+			uHandles[i].abort(false)
 		}
 	}
 
@@ -183,7 +183,7 @@ func NewUndoTx() TX {
 func releaseUndoTx(t *undoTx) {
 	// Reset the pointers in the log entries, but need not allocate a new
 	// backing array
-	t.abort()
+	t.abort(false)
 	index := (uintptr(unsafe.Pointer(t)) - uintptr(unsafe.Pointer(&uHandles[0]))) /
 		unsafe.Sizeof(uHandles[0])
 	undoArray.clearBit(int(index))
@@ -212,10 +212,10 @@ func (t *undoTx) resetLogData() {
 	t.ptrArray = t.ptrArray[:0]
 }
 
-// increaseLogTail creates an undo log buffer of size at least toAdd bytes and
+// increaseLogSize creates an undo log buffer of size at least toAdd bytes and
 // links it to the existing linked list of log buffers. It also tries to reuse
 // any existing buffers that has sufficient capacity.
-func (t *undoTx) increaseLogTail(toAdd int) {
+func (t *undoTx) increaseLogSize(toAdd int) {
 	uData := t.curr
 
 	// We need at least toAdd bytes and current buffer do not have that much
@@ -303,7 +303,7 @@ func (t *undoTx) Log3(src unsafe.Pointer, size uintptr) error {
 	// rounded up to cache line size
 	logSize := int((size+uLogHdrSize+63)/cacheSize) * cacheSize
 	if tail+logSize > cap(uData.log) {
-		t.increaseLogTail(logSize)
+		t.increaseLogSize(logSize)
 		uData = t.curr
 		tail = t.tail
 	}
@@ -398,6 +398,7 @@ func (t *undoTx) Log(intf ...interface{}) error {
 	case reflect.Slice:
 		t.logSlice(v1, true)
 	case reflect.Ptr:
+		/* TODO
 		tail := t.tail
 		oldv := reflect.Indirect(v1) // get the underlying data of pointer
 		typ := oldv.Type()
@@ -407,7 +408,6 @@ func (t *undoTx) Log(intf ...interface{}) error {
 			t.storeSliceHdr = append(t.storeSliceHdr, pair{tail, int(typ.Elem().Size())})
 		}
 
-		/* TODO
 		size := int(typ.Size())
 		v2 := reflect.PNew(oldv.Type())
 		reflect.Indirect(v2).Set(oldv) // copy old data
@@ -423,15 +423,15 @@ func (t *undoTx) Log(intf ...interface{}) error {
 		runtime.FlushRange(uData.log[tail].data, uintptr(size))
 		runtime.FlushRange(unsafe.Pointer(&uData.log[tail]),
 			unsafe.Sizeof(uData.log[tail]))
-		*/
 
 		// Update log offset in header.
-		t.increaseLogTail(0) // TODO
+		t.increaseLogSize()
 		if oldv.Kind() == reflect.Slice {
 			// Pointer to slice was passed to Log(). So, log slice elements too,
 			// but no need to flush these contents in End()
 			t.logSlice(oldv, false)
 		}
+		*/
 	default:
 		debug.PrintStack()
 		return errors.New("[undoTx] Log: data must be pointer/slice")
@@ -514,7 +514,7 @@ func (t *undoTx) logSlice(v1 reflect.Value, flushAtEnd bool) {
 	*/
 
 	// Update log offset in header.
-	t.increaseLogTail(0) // TODO
+	t.increaseLogSize(0) // TODO
 }
 
 /* Exec function receives a variable number of interfaces as its arguments.
@@ -628,8 +628,9 @@ func (t *undoTx) unLock() {
 
 // abort() aborts the ongoing undo transaction. It reverts the changes made by
 // the application by copying the logged copy of the data to its original
-// location in persistent memory.
-func (t *undoTx) abort() error {
+// location in persistent memory. swizzle indicates if pointers has to be
+// swizzled before being dereferenced.
+func (t *undoTx) abort(swizzle bool) error {
 	defer t.unLock()
 	t.level = 0
 	uData := t.first
@@ -643,7 +644,15 @@ func (t *undoTx) abort() error {
 	for uData != nil {
 		off := 0
 		for off+64 <= len(uData.log) {
-			logBuf := unsafe.Pointer(&uData.log[off])
+			var logBuf unsafe.Pointer
+			if swizzle {
+				shdr := (*sliceHeader)(unsafe.Pointer(&uData.log))
+				sPtr := shdr.data
+				sPtrSwizz := runtime.SwizzlePointer(uintptr(sPtr))
+				logBuf = unsafe.Pointer(uintptr(sPtrSwizz) + uintptr(off))
+			} else {
+				logBuf = unsafe.Pointer(&uData.log[off])
+			}
 			genPtr := (*uintptr)(logBuf)
 			if *genPtr != t.genNum {
 				// The generation number of this entry does not match the
@@ -659,12 +668,19 @@ func (t *undoTx) abort() error {
 			off += toAdd
 		}
 		uData = uData.next
+		if swizzle {
+			uDatap := uintptr(unsafe.Pointer(uData))
+			uData = (*uLogData)(unsafe.Pointer(runtime.SwizzlePointer(uDatap)))
+		}
 	}
 
 	for j := len(undoEntries) - 1; j >= 0; j-- {
 		entry := undoEntries[j]
 		size := *(*uintptr)(unsafe.Pointer(entry))
 		origPtr := *(*uintptr)(unsafe.Pointer(entry + ptrSize))
+		if swizzle {
+			origPtr = runtime.SwizzlePointer(origPtr)
+		}
 		dataPtr := unsafe.Pointer(entry + 16)
 		origData := (*[maxInt]byte)(unsafe.Pointer(origPtr))
 		logData := (*[maxInt]byte)(dataPtr)
@@ -678,4 +694,35 @@ func (t *undoTx) abort() error {
 	t.genNum = t.first.genNum
 	t.resetLogData()
 	return nil
+}
+
+// If runtime needs to do pointer swizzling duing initilization, then undo log
+// entries need to be reverted before doing pointer swizzling. This function is
+// registered as a callback with the runtime, and will be called before pointers
+// are swizzled. rootPtr is the swizzled root pointer set by the application.
+func SwizzleAndAbort(rootPtr unsafe.Pointer) {
+	// pmemHeader definition is not available here.
+	type pmh struct {
+		undoTxHeadPtr unsafe.Pointer
+		redoTxHeadPtr unsafe.Pointer
+		appData       []int // namedObject definition not available here
+	}
+	appRootPtr := (*pmh)(rootPtr)
+	undoTxSwizzled := runtime.SwizzlePointer(uintptr(unsafe.Pointer(appRootPtr.undoTxHeadPtr)))
+	undoTxHeadPtr := (*undoTxHeader)(unsafe.Pointer(undoTxSwizzled))
+
+	// Check if the magic number matches
+	if undoTxHeadPtr.magic != magic {
+		log.Fatal("undoTxHeader magic does not match!")
+	}
+
+	for i := 0; i < logNum; i++ {
+		handle := &undoTxHeadPtr.logData[i]
+		uHandles[i].first = handle
+		uHandles[i].genNum = handle.genNum
+		// Reallocate the array for the log entries. TODO: How does this
+		// change with tail not in pmem?
+		uHandles[i].abort(true)
+	}
+
 }
