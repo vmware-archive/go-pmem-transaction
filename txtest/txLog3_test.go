@@ -13,6 +13,34 @@ import (
 	"github.com/vmware/go-pmem-transaction/transaction"
 )
 
+// Common data types and functions used across tests
+
+type structLogTest struct {
+	i     int
+	iptr  *int
+	slice []int
+}
+
+var (
+	j       *int
+	b       *bool
+	slice1  []int
+	slice2  []int
+	struct1 *structLogTest
+	struct2 *structLogTest
+)
+
+func resetData() {
+	b = pnew(bool)
+	j = pnew(int)
+	slice1 = pmake([]int, 100, 100)
+	slice2 = pmake([]int, 100, 100)
+	struct1 = pnew(structLogTest)
+	struct2 = pnew(structLogTest)
+	struct1.i = 1
+	struct2.i = 2
+}
+
 // Keeping Log3 tests in a separate file
 
 func TestUndoLog3Basic(t *testing.T) {

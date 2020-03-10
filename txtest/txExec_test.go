@@ -11,8 +11,13 @@ import (
 	"reflect"
 	"runtime/debug"
 	"testing"
+	"unsafe"
 
 	"github.com/vmware/go-pmem-transaction/transaction"
+)
+
+const (
+	intSize = 8
 )
 
 type basic struct {
@@ -21,12 +26,12 @@ type basic struct {
 }
 
 func add(tx transaction.TX, a *basic, b *basic) {
-	tx.Log(&a.i)
+	tx.Log3(unsafe.Pointer(&a.i), intSize)
 	a.i = a.i + b.i
 }
 
 func addRet(tx transaction.TX, a *basic, b *basic) int {
-	tx.Log(&a.i)
+	tx.Log3(unsafe.Pointer(&a.i), intSize)
 	return a.i + b.i
 }
 
@@ -86,7 +91,7 @@ func TestExec(t *testing.T) {
 	tx = transaction.NewUndoTx()
 	_, err = tx.Exec(func(tx transaction.TX) {
 		tx.Begin()
-		tx.Log(a)
+		tx.Log3(unsafe.Pointer(a), unsafe.Sizeof(*a))
 		a.i = a.i + b.i
 	})
 	transaction.Release(tx)
@@ -100,7 +105,7 @@ func TestExec(t *testing.T) {
 	tx = transaction.NewUndoTx()
 	_, err = tx.Exec(func(tx transaction.TX) {
 		tx.Begin()
-		tx.Log(a)
+		tx.Log3(unsafe.Pointer(a), unsafe.Sizeof(*a))
 		a.i = a.i + b.i
 		tx.End()
 	})
@@ -113,7 +118,7 @@ func TestExec(t *testing.T) {
 	b.i = 300
 	tx = transaction.NewUndoTx()
 	_, err = tx.Exec(func(tx transaction.TX) {
-		tx.Log(a)
+		tx.Log3(unsafe.Pointer(a), unsafe.Sizeof(*a))
 		a.i = a.i + b.i
 		tx.End()
 	})
@@ -136,7 +141,7 @@ func TestExec(t *testing.T) {
 	b.i = 30
 	tx = transaction.NewUndoTx()
 	retVal, err = tx.Exec(func(tx transaction.TX) {
-		tx.Log(a)
+		tx.Log3(unsafe.Pointer(a), unsafe.Sizeof(*a))
 		a.i = a.i + b.i
 		a.slice = append(a.slice, 40)
 		a.slice = append(a.slice, 50)
@@ -155,7 +160,7 @@ func TestExec(t *testing.T) {
 	a.slice = pmake([]int, 0)
 	tx = transaction.NewUndoTx()
 	_, err = tx.Exec(func(tx transaction.TX) {
-		tx.Log(a)
+		tx.Log3(unsafe.Pointer(a), unsafe.Sizeof(*a))
 		a.i = a.i + b.i
 		a.slice = append(a.slice, 400)
 
@@ -173,7 +178,7 @@ func TestExec(t *testing.T) {
 	tx = transaction.NewUndoTx()
 	_, err = tx.Exec(func(tx transaction.TX) {
 		a.i = a.i + b.i
-		tx.Log(&a.slice)
+		tx.Log3(unsafe.Pointer(&a.slice), 24) // 24 is the size of slice header
 		a.slice = append(a.slice, 4000)
 
 		// Release aborts the transaction because tx.End() is not called yet
@@ -200,7 +205,7 @@ func TestExec(t *testing.T) {
 	retVal, err = tx.Exec(func(tx transaction.TX) *basic {
 		c := pnew(basic)
 		c.slice = pmake([]int, 0)
-		tx.Log(c)
+		tx.Log3(unsafe.Pointer(c), unsafe.Sizeof(*c))
 		c.i = a.i + b.i
 		c.slice = append(c.slice, 40)
 		c.slice = append(c.slice, 50)

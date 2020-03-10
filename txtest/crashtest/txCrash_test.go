@@ -1,5 +1,10 @@
 // +build crash
 
+///////////////////////////////////////////////////////////////////////
+// Copyright 2018-2019 VMware, Inc.
+// SPDX-License-Identifier: BSD-3-Clause
+///////////////////////////////////////////////////////////////////////
+
 // This test needs to be run twice to check for data consistency after crash.
 // Hence this test is not run by default and will only be run if a flag
 // 'crash' is specified while running the tests.
