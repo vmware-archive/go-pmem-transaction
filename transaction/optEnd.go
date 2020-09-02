@@ -5,7 +5,7 @@ import (
 	"unsafe"
 )
 
-var cacheLineSz = uintptr(runtime.FLUSH_ALIGN)
+var cacheLineSz = uintptr(64)
 
 type (
 	flushSt struct {
