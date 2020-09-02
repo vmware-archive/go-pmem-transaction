@@ -2,8 +2,10 @@
 
 set -e
 
-# Travis CI clones the repository at ~/vmware/go-pmem-transaction
+# GitHub CI clones the repository at /home/runner/work//go-pmem-transaction/go-pmem-transaction
 # Move the repository into GOPATH first.
+mkdir ~/go
+export GOPATH=~/go
 cd ..
 mkdir -p $GOPATH/src/github.com/vmware
 mv go-pmem-transaction $GOPATH/src/github.com/vmware
