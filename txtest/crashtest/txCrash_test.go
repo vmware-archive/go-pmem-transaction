@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"unsafe"
 
 	"github.com/vmware/go-pmem-transaction/pmem"
 	"github.com/vmware/go-pmem-transaction/transaction"
@@ -26,6 +27,10 @@ import (
 type st struct {
 	slice []int
 }
+
+const (
+	sliceHdrSize = uintptr(24)
+)
 
 // This test makes sure that undo transaction doesn't store any contents of a
 // slice in volatile memory. If it does, on the restart-after-crash path, GC
@@ -38,15 +43,15 @@ func TestUpdateCrash(t *testing.T) {
 		st1 = (*st)(pmem.New("r1", st1))
 		tx := transaction.NewUndoTx()
 		tx.Begin()
-		tx.Log(&st1.slice)
+		tx.Log3(unsafe.Pointer(&st1.slice), sliceHdrSize)
 		//slicehdr is in pmem, but create slice contents in volatile memory
 		st1.slice = make([]int, 3)
 		tx.End()
 
 		st2 := (*st)(pmem.Get("r1", st1))
 		tx.Begin()
-
-		tx.Log(&st2.slice, []int{10, 20, 30, 40})
+		tx.Log3(unsafe.Pointer(&st2.slice), sliceHdrSize)
+		st2.slice = []int{10, 20, 30, 40}
 		fmt.Println("[TestUpdateCrash]: Crashing now")
 		return // <-- return before ending transaction to simulate CRASH!
 	} else {

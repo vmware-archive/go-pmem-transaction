@@ -2,14 +2,6 @@
 
 set -e
 
-# GitHub CI clones the repository at /home/runner/work//go-pmem-transaction/go-pmem-transaction
-# Move the repository into GOPATH first.
-mkdir ~/go
-export GOPATH=~/go
-cd ..
-mkdir -p $GOPATH/src/github.com/vmware
-mv go-pmem-transaction $GOPATH/src/github.com/vmware
-
 # Build the modified Go compiler.
 git clone --depth 1  https://github.com/jerrinsg/go-pmem ~/go-pmem
 cd ~/go-pmem/src
