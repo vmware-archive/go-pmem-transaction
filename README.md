@@ -16,11 +16,10 @@ https://github.com/jerrinsg/go-pmem).
 ```
 $ cd src
 $ ./all.bash
-
 ```
 You can also follow the general instructions for building Go from its source code found [here](https://golang.org/doc/install/source#install).
 
-3. go get -u github.com/vmware/go-pmem-transaction/...
+3. `go get -u github.com/vmware/go-pmem-transaction/...`
 4. Make sure to build these packages (and applications using these packages) using the Go binary built in step 2.
 
 ## Documentation
