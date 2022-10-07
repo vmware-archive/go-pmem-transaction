@@ -2,6 +2,9 @@
 
 # go-pmem-transaction
 
+## Warning
+VMware has ended active development of this project, this repository will no longer be updated.
+
 ## Overview
 A library to make persistent memory accessible to developers of Go language. More details about Persistent memory can be found [here](https://docs.pmem.io/). This repostiory has two Go packages (pmem & transaction).
 
