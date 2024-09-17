@@ -7,6 +7,7 @@
 package main
 
 import (
+	"flag"
 	"math/rand"
 	"time"
 
@@ -37,51 +38,40 @@ type root struct {
 // Function to generate a random byte slice in persistent memory of length n
 func randString(n int) []byte {
 	b := pmake([]byte, n) // transaction here
-	tx := transaction.NewUndoTx()
-	tx.Begin()
-	tx.Log(b)
+
+	txn("undo") {
 	for i := range b {
 		b[i] = byte(rand.Intn(26) + 65)
 	}
-	tx.End()
-	transaction.Release(tx)
+	}
+
 	return b
 }
 
 // A function that populates the contents of the root object transactionally
 func populateRoot(rptr *root) {
-	tx := transaction.NewUndoTx()
-	tx.Begin()
-	tx.Log(rptr)
+	txn("undo") {
 	rptr.magic = magic
 	rptr.head = nil
 	rptr.tail = nil
-	tx.End()
-	transaction.Release(tx)
+	}
 }
 
 // Adds a node to the linked list and updates the tail (and head if empty)
 // All data updates are handled transactionally
 func addNode(rptr *root) {
 	entry := pnew(entry)
-	tx := transaction.NewUndoTx()
-	tx.Begin()
-	tx.Log(entry)
-	tx.Log(rptr)
+
+	txn("undo") {
 	entry.id = rand.Intn(100)
 	entry.data = randString(10)
-
 	if rptr.head == nil {
 		rptr.head = entry
 	} else {
-		tx.Log(&rptr.tail.next)
 		rptr.tail.next = entry
 	}
 	rptr.tail = entry
-
-	tx.End()
-	transaction.Release(tx)
-
+	}
 }
 
 // Print all the nodes currently in the linked list
@@ -93,9 +83,14 @@ func printNodes(rptr *root) {
 	}
 }
 
+var (
+	pmemFile = flag.String("file", "testfile", "pmem file name")
+)
+
 func main() {
 	rand.Seed(time.Now().UTC().UnixNano())
-	firstInit := pmem.Init("/mnt/ext4-pmem0/database")
+	flag.Parse()
+	firstInit := pmem.Init(*pmemFile)
 	var rptr *root
 	if firstInit {
 		// Create a new named object called dbRoot and point it to rptr
